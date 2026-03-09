@@ -12,59 +12,46 @@ class TextModal(discord.ui.Modal):
         self.add_item(self.answer)
 
     async def on_submit(self, interaction: discord.Interaction):
-        from sqlalchemy import select as sql_select
-        from sqlalchemy.exc import IntegrityError
+        from database import get_session, upsert_answer, get_next_question
+        import utils
+
         async with get_session() as session:
-            result = await session.execute(
-                sql_select(Response).filter_by(
-                    survey_id=self.survey_id,
-                    user_id=str(interaction.user.id)
-                )
+            # 1. Save the answer
+            await upsert_answer(
+                session=session, 
+                survey_id=self.survey_id, 
+                question_id=self.question_id, 
+                user_id=str(interaction.user.id), 
+                answer_value=self.answer.value
             )
-            response = result.scalars().first()
-
-            if not response:
-                try:
-                    response = Response(
-                        survey_id=self.survey_id,
-                        user_id=str(interaction.user.id)
-                    )
-                    session.add(response)
-                    await session.commit()
-                    await session.refresh(response)
-                except IntegrityError:
-                    await session.rollback()
-                    result = await session.execute(
-                        sql_select(Response).filter_by(
-                            survey_id=self.survey_id,
-                            user_id=str(interaction.user.id)
-                        )
-                    )
-                    response = result.scalars().first()
-
-            result = await session.execute(
-                sql_select(Answer).filter_by(
-                    response_id=response.id,
-                    question_id=self.question_id
-                )
+            
+            # 2. Get next question
+            next_q = await get_next_question(
+                session=session, 
+                survey_id=self.survey_id, 
+                user_id=str(interaction.user.id)
             )
-            existing_answer = result.scalars().first()
 
-            action_text = "saved"
-            if existing_answer:
-                existing_answer.answer = self.answer.value
-                action_text = "updated"
-            else:
-                session.add(
-                    Answer(
-                        response_id=response.id,
-                        question_id=self.question_id,
-                        answer=self.answer.value
-                    )
-                )
-            await session.commit()
+            # 3. Transition to next question
+            # Since this is a modal submission, interaction.response is not yet done!
+            # send_question_ui will send an ephemeral message or a new modal or edit.
+            await utils.send_question_ui(
+                interaction=interaction,
+                session=session,
+                survey_id=self.survey_id,
+                question=next_q,
+                is_edit=True
+            )
 
-        await interaction.response.send_message(
-            f"📝 Answer {action_text}",
-            ephemeral=True
+class TextPromptView(discord.ui.View):
+    def __init__(self, survey_id, question_id, title):
+        super().__init__(timeout=120)
+        self.survey_id = survey_id
+        self.question_id = question_id
+        self.title_text = title
+
+    @discord.ui.button(label="Answer Question", style=discord.ButtonStyle.primary, emoji="📝")
+    async def open_modal(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(
+            TextModal(self.survey_id, self.question_id, self.title_text)
         )

@@ -317,39 +317,41 @@ async def answer(
             )
             return
 
-        result = await session.execute(
-            select(Question)
-            .filter_by(survey_id=survey.id)
-            .order_by(Question.id)
+        from database import get_next_question
+        import utils
+        
+        next_q = await get_next_question(
+            session=session,
+            survey_id=survey.id,
+            user_id=str(interaction.user.id)
         )
-        question = result.scalars().first()
 
-        if not question:
+        if not next_q:
+            # Maybe they haven't started, or there are no questions
+            result = await session.execute(
+                select(Question).filter_by(survey_id=survey.id)
+            )
+            has_questions = result.scalars().first()
+            if not has_questions:
+                await interaction.response.send_message(
+                    "❌ Survey has no questions",
+                    ephemeral=True
+                )
+                return
+            # Otherwise, they finished the survey already
             await interaction.response.send_message(
-                "❌ Survey has no questions",
+                "🎉 **Survey Completed!** You have already answered all questions.",
                 ephemeral=True
             )
             return
 
-        if question.qtype == "mcq":
-            result = await session.execute(select(Choice).filter_by(question_id=question.id))
-            choices = result.scalars().all()
-            view = MCQView(survey.id, question.id, [c.text for c in choices])
-            await interaction.response.send_message(
-                f"📋 **{question.text}**",
-                view=view
-            )
-
-        elif question.qtype == "rating":
-            await interaction.response.send_message(
-                f"⭐ **{question.text}**",
-                view=RatingView(survey.id, question.id)
-            )
-
-        elif question.qtype == "text":
-            await interaction.response.send_modal(
-                TextModal(survey.id, question.id, question.text)
-            )
+        await utils.send_question_ui(
+            interaction=interaction,
+            session=session,
+            survey_id=survey.id,
+            question=next_q,
+            is_edit=False
+        )
 
 # =====================
 # /survey close

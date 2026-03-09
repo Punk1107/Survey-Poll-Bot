@@ -26,59 +26,33 @@ class MCQView(discord.ui.View):
 
     @discord.ui.select()
     async def select_callback(self, interaction: discord.Interaction, select):
-        from sqlalchemy import select as sql_select
-        from sqlalchemy.exc import IntegrityError
+        from database import get_session, upsert_answer, get_next_question
+        import utils
+
+        answer_val = select.values[0]
+        
         async with get_session() as session:
-            result = await session.execute(
-                sql_select(Response).filter_by(
-                    survey_id=self.survey_id,
-                    user_id=str(interaction.user.id)
-                )
+            # 1. Save the answer
+            await upsert_answer(
+                session=session, 
+                survey_id=self.survey_id, 
+                question_id=self.question_id, 
+                user_id=str(interaction.user.id), 
+                answer_value=answer_val
             )
-            response = result.scalars().first()
-
-            if not response:
-                try:
-                    response = Response(
-                        survey_id=self.survey_id,
-                        user_id=str(interaction.user.id)
-                    )
-                    session.add(response)
-                    await session.commit()
-                    await session.refresh(response)
-                except IntegrityError:
-                    await session.rollback()
-                    result = await session.execute(
-                        sql_select(Response).filter_by(
-                            survey_id=self.survey_id,
-                            user_id=str(interaction.user.id)
-                        )
-                    )
-                    response = result.scalars().first()
-
-            result = await session.execute(
-                sql_select(Answer).filter_by(
-                    response_id=response.id,
-                    question_id=self.question_id
-                )
+            
+            # 2. Get next question
+            next_q = await get_next_question(
+                session=session, 
+                survey_id=self.survey_id, 
+                user_id=str(interaction.user.id)
             )
-            existing_answer = result.scalars().first()
 
-            action_text = "submitted"
-            if existing_answer:
-                existing_answer.answer = select.values[0]
-                action_text = "updated"
-            else:
-                session.add(
-                    Answer(
-                        response_id=response.id,
-                        question_id=self.question_id,
-                        answer=select.values[0]
-                    )
-                )
-            await session.commit()
-
-        await interaction.response.send_message(
-            f"✅ Answer {action_text}: **{select.values[0]}**",
-            ephemeral=True
-        )
+            # 3. Transition to next question
+            await utils.send_question_ui(
+                interaction=interaction,
+                session=session,
+                survey_id=self.survey_id,
+                question=next_q,
+                is_edit=True
+            )

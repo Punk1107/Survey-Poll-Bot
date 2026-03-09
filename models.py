@@ -12,7 +12,7 @@ class Survey(Base):
 
     id = Column(Integer, primary_key=True)
     title = Column(String, nullable=False)
-    creator_id = Column(String, nullable=False)
+    creator_id = Column(String, nullable=False, index=True)
     is_anonymous = Column(Boolean, default=True)
     is_published = Column(Boolean, default=False)
     is_closed = Column(Boolean, default=False)
@@ -26,7 +26,7 @@ class Question(Base):
     __tablename__ = "questions"
 
     id = Column(Integer, primary_key=True)
-    survey_id = Column(Integer, ForeignKey("surveys.id", ondelete="CASCADE"))
+    survey_id = Column(Integer, ForeignKey("surveys.id", ondelete="CASCADE"), index=True)
     text = Column(String, nullable=False)
     qtype = Column(String, nullable=False)  # mcq | rating | text
 
@@ -38,7 +38,7 @@ class Choice(Base):
     __tablename__ = "choices"
 
     id = Column(Integer, primary_key=True)
-    question_id = Column(Integer, ForeignKey("questions.id", ondelete="CASCADE"))
+    question_id = Column(Integer, ForeignKey("questions.id", ondelete="CASCADE"), index=True)
     text = Column(String, nullable=False)
 
     question = relationship("Question", back_populates="choices")
@@ -47,8 +47,8 @@ class Response(Base):
     __tablename__ = "responses"
 
     id = Column(Integer, primary_key=True)
-    survey_id = Column(Integer, ForeignKey("surveys.id", ondelete="CASCADE"))
-    user_id = Column(String, nullable=True)
+    survey_id = Column(Integer, ForeignKey("surveys.id", ondelete="CASCADE"), index=True)
+    user_id = Column(String, nullable=True, index=True)
     submitted_at = Column(DateTime, default=datetime.utcnow)
 
     survey = relationship("Survey", back_populates="responses")
@@ -62,8 +62,8 @@ class Answer(Base):
     __tablename__ = "answers"
 
     id = Column(Integer, primary_key=True)
-    response_id = Column(Integer, ForeignKey("responses.id", ondelete="CASCADE"))
-    question_id = Column(Integer, ForeignKey("questions.id", ondelete="CASCADE"))
+    response_id = Column(Integer, ForeignKey("responses.id", ondelete="CASCADE"), index=True)
+    question_id = Column(Integer, ForeignKey("questions.id", ondelete="CASCADE"), index=True)
     answer = Column(String)
 
     response = relationship("Response", back_populates="answers")
