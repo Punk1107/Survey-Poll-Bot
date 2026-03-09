@@ -21,59 +21,31 @@ class RatingButton(discord.ui.Button):
         self.parent = parent
 
     async def callback(self, interaction: discord.Interaction):
-        from sqlalchemy import select as sql_select
-        from sqlalchemy.exc import IntegrityError
+        from database import get_session, upsert_answer, get_next_question
+        import utils
+
         async with get_session() as session:
-            result = await session.execute(
-                sql_select(Response).filter_by(
-                    survey_id=self.parent.survey_id,
-                    user_id=str(interaction.user.id)
-                )
+            # 1. Save the answer
+            await upsert_answer(
+                session=session, 
+                survey_id=self.parent.survey_id, 
+                question_id=self.parent.question_id, 
+                user_id=str(interaction.user.id), 
+                answer_value=str(self.value)
             )
-            response = result.scalars().first()
-
-            if not response:
-                try:
-                    response = Response(
-                        survey_id=self.parent.survey_id,
-                        user_id=str(interaction.user.id)
-                    )
-                    session.add(response)
-                    await session.commit()
-                    await session.refresh(response)
-                except IntegrityError:
-                    await session.rollback()
-                    result = await session.execute(
-                        sql_select(Response).filter_by(
-                            survey_id=self.parent.survey_id,
-                            user_id=str(interaction.user.id)
-                        )
-                    )
-                    response = result.scalars().first()
             
-            result = await session.execute(
-                sql_select(Answer).filter_by(
-                    response_id=response.id,
-                    question_id=self.parent.question_id
-                )
+            # 2. Get next question
+            next_q = await get_next_question(
+                session=session, 
+                survey_id=self.parent.survey_id, 
+                user_id=str(interaction.user.id)
             )
-            existing_answer = result.scalars().first()
 
-            action_text = "Rated"
-            if existing_answer:
-                existing_answer.answer = str(self.value)
-                action_text = "Updated rating to"
-            else:
-                session.add(
-                    Answer(
-                        response_id=response.id,
-                        question_id=self.parent.question_id,
-                        answer=str(self.value)
-                    )
-                )
-            await session.commit()
-
-        await interaction.response.send_message(
-            f"⭐ {action_text} {self.value}",
-            ephemeral=True
-        )
+            # 3. Transition to next question
+            await utils.send_question_ui(
+                interaction=interaction,
+                session=session,
+                survey_id=self.parent.survey_id,
+                question=next_q,
+                is_edit=True
+            )
