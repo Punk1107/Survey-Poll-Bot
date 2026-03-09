@@ -18,6 +18,7 @@ from database import (
     get_session,
     get_question_count,
     get_response_count,
+    run_migrations,
 )
 from models import Base, Survey, Question, Choice, Response, Answer
 from views.mcq import MCQView
@@ -61,6 +62,7 @@ bot.tree.add_command(survey)
 async def setup_hook():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await run_migrations()
     log.info("Database tables created / verified.")
 
 

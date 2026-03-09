@@ -30,6 +30,35 @@ if _is_sqlite:
 engine = create_async_engine(async_db_url, **_engine_kwargs)
 
 
+# ── Schema migrations ────────────────────────────────────────────────────────
+async def run_migrations() -> None:
+    """
+    Add any columns that exist in the ORM models but are missing from the
+    live database (SQLite's CREATE TABLE … IF NOT EXISTS won't add new columns
+    to an existing table, so we handle that here explicitly).
+    """
+    # Each entry: (table, column, DDL type, default expression)
+    _pending: list[tuple[str, str, str, str]] = [
+        ("surveys", "description",   "TEXT",    "NULL"),
+        ("surveys", "max_responses", "INTEGER", "NULL"),
+        ("questions", "order",       "INTEGER", "0"),
+    ]
+
+    async with engine.begin() as conn:
+        for table, column, col_type, default in _pending:
+            # PRAGMA table_info returns one row per column
+            rows = await conn.execute(text(f"PRAGMA table_info({table})"))
+            existing = {row[1] for row in rows}   # index 1 = column name
+            if column not in existing:
+                await conn.execute(
+                    text(
+                        f"ALTER TABLE {table} "
+                        f"ADD COLUMN {column} {col_type} DEFAULT {default}"
+                    )
+                )
+                log.info("Migration: added column '%s.%s'", table, column)
+
+
 # ── SQLite PRAGMAs ──────────────────────────────────────────────────────────
 @event.listens_for(engine.sync_engine, "connect")
 def _set_sqlite_pragmas(dbapi_conn, _connection_record):
