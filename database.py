@@ -1,95 +1,194 @@
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+import logging
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator
+
+from sqlalchemy import event, text
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, AsyncConnection
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
 from config import DATABASE_URL
 
-# Fix sqlite URL for aiosqlite: sqlite:///... -> sqlite+aiosqlite:///...
-async_db_url = DATABASE_URL.replace("sqlite:///", "sqlite+aiosqlite:///")
+log = logging.getLogger(__name__)
 
-engine = create_async_engine(
-    async_db_url,
-    connect_args={"check_same_thread": False}
-)
+# ── Engine setup ────────────────────────────────────────────────────────────
+_is_sqlite = DATABASE_URL.startswith("sqlite")
 
-AsyncSessionLocal = sessionmaker(
+# Convert bare sqlite:// → sqlite+aiosqlite://
+async_db_url = DATABASE_URL.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
+
+_engine_kwargs: dict = {
+    "echo": False,
+}
+
+if _is_sqlite:
+    # StaticPool keeps a single connection for SQLite — needed for WAL + in-memory DBs.
+    # For file-based SQLite the pool defaults are fine, but we tune them explicitly.
+    _engine_kwargs["connect_args"] = {"check_same_thread": False}
+    _engine_kwargs["pool_pre_ping"] = True
+
+engine = create_async_engine(async_db_url, **_engine_kwargs)
+
+
+# ── SQLite PRAGMAs ──────────────────────────────────────────────────────────
+@event.listens_for(engine.sync_engine, "connect")
+def _set_sqlite_pragmas(dbapi_conn, _connection_record):
+    """
+    Applied once per physical SQLite connection.
+    WAL mode → massively improves concurrent read/write throughput.
+    foreign_keys=ON → enforce referential integrity at the DB level.
+    """
+    cursor = dbapi_conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.execute("PRAGMA synchronous=NORMAL")   # safe + faster than FULL
+    cursor.execute("PRAGMA cache_size=-32000")    # 32 MB page cache
+    cursor.close()
+
+
+# ── Session factory ─────────────────────────────────────────────────────────
+_AsyncSessionFactory = sessionmaker(
     bind=engine,
     class_=AsyncSession,
-    expire_on_commit=False
+    expire_on_commit=False,
+    autoflush=False,   # explicit flush gives us control; avoids accidental DB hits
 )
 
-def get_session() -> AsyncSession:
-    return AsyncSessionLocal()
 
-async def upsert_answer(session: AsyncSession, survey_id: int, question_id: int, user_id: str, answer_value: str) -> tuple[str, bool]:
+@asynccontextmanager
+async def get_session() -> AsyncGenerator[AsyncSession, None]:
+    """
+    Async context manager that provides a scoped AsyncSession.
+    Rolls back on exception; always closes the session.
+
+    Usage:
+        async with get_session() as session:
+            ...
+    """
+    session: AsyncSession = _AsyncSessionFactory()
+    try:
+        yield session
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
+    finally:
+        await session.close()
+
+
+# ── Domain helpers ──────────────────────────────────────────────────────────
+async def upsert_answer(
+    session: AsyncSession,
+    survey_id: int,
+    question_id: int,
+    user_id: str,
+    answer_value: str,
+) -> tuple[str, bool]:
+    """
+    Insert or update a single answer for a user on a survey question.
+    Returns (answer_value, is_update).
+    """
     from models import Response, Answer
     from sqlalchemy import select
     from sqlalchemy.exc import IntegrityError
-    
-    # 1. Get or create response object
+
+    # 1. Get-or-create the Response row
     result = await session.execute(
         select(Response).filter_by(survey_id=survey_id, user_id=user_id)
     )
     response = result.scalars().first()
 
     if not response:
+        response = Response(survey_id=survey_id, user_id=user_id)
+        session.add(response)
         try:
-            response = Response(survey_id=survey_id, user_id=user_id)
-            session.add(response)
-            await session.commit()
-            await session.refresh(response)
+            await session.flush()   # get the ID without a full commit
         except IntegrityError:
+            # Race: another coroutine committed first — fetch the existing row
             await session.rollback()
             result = await session.execute(
                 select(Response).filter_by(survey_id=survey_id, user_id=user_id)
             )
             response = result.scalars().first()
 
-    # 2. Upsert answer
+    # 2. Upsert the Answer row
     result = await session.execute(
         select(Answer).filter_by(response_id=response.id, question_id=question_id)
     )
-    existing_answer = result.scalars().first()
+    existing = result.scalars().first()
 
-    is_update = False
-    if existing_answer:
-        existing_answer.answer = str(answer_value)
+    if existing:
+        existing.answer = str(answer_value)
         is_update = True
     else:
-        session.add(Answer(response_id=response.id, question_id=question_id, answer=str(answer_value)))
-    
-    await session.commit()
+        session.add(
+            Answer(response_id=response.id, question_id=question_id, answer=str(answer_value))
+        )
+        is_update = False
+
+    # Caller's context manager will commit
     return answer_value, is_update
 
+
 async def get_next_question(session: AsyncSession, survey_id: int, user_id: str):
+    """
+    Return the next unanswered Question for a user in a survey, ordered by
+    (question.order, question.id).  Returns None when all questions answered.
+    """
     from models import Question, Answer, Response
-    from sqlalchemy import select, and_
-    
-    # 1. Get the response ID if it exists
+    from sqlalchemy import select
+
+    # 1. Check for existing response
     result = await session.execute(
         select(Response.id).filter_by(survey_id=survey_id, user_id=user_id)
     )
     response_id = result.scalar()
 
-    # 2. Get all question IDs for this survey
-    questions_query = select(Question).filter_by(survey_id=survey_id).order_by(Question.id)
-    result = await session.execute(questions_query)
+    # 2. All questions for the survey, ordered deterministically
+    result = await session.execute(
+        select(Question)
+        .filter_by(survey_id=survey_id)
+        .order_by(Question.order, Question.id)
+    )
     questions = result.scalars().all()
 
     if not questions:
         return None
 
     if not response_id:
-        # No response yet, return the first question
         return questions[0]
 
-    # 3. Get all answered question IDs
-    answered_query = select(Answer.question_id).filter_by(response_id=response_id)
-    result = await session.execute(answered_query)
+    # 3. Set of already-answered question IDs
+    result = await session.execute(
+        select(Answer.question_id).filter_by(response_id=response_id)
+    )
     answered_ids = set(result.scalars().all())
 
-    # 4. Find the first unanswered question
+    # 4. First unanswered
     for q in questions:
         if q.id not in answered_ids:
             return q
-            
-    # All answered
-    return None
+
+    return None  # all done
+
+
+async def get_question_count(session: AsyncSession, survey_id: int) -> int:
+    """Return the total number of questions for a survey."""
+    from models import Question
+    from sqlalchemy import select, func
+
+    result = await session.execute(
+        select(func.count()).select_from(Question).filter_by(survey_id=survey_id)
+    )
+    return result.scalar() or 0
+
+
+async def get_response_count(session: AsyncSession, survey_id: int) -> int:
+    """Return the number of distinct users who have responded."""
+    from models import Response
+    from sqlalchemy import select, func
+
+    result = await session.execute(
+        select(func.count()).select_from(Response).filter_by(survey_id=survey_id)
+    )
+    return result.scalar() or 0

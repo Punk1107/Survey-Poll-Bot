@@ -1,28 +1,98 @@
-import discord
-from discord.ext import commands
-from discord import app_commands
-from sqlalchemy import select
-import os
+"""
+Survey Poll Bot — bot.py
+Comprehensive Discord slash-command bot for creating, managing, and answering surveys.
+"""
 
-from config import DISCORD_TOKEN
-from database import engine, get_session
-from models import Base, Survey, Question, Choice
+import logging
+import os
+import sys
+
+import discord
+from discord import app_commands
+from discord.ext import commands
+from sqlalchemy import select, func
+
+from config import DISCORD_TOKEN, LOG_LEVEL
+from database import (
+    engine,
+    get_session,
+    get_question_count,
+    get_response_count,
+)
+from models import Base, Survey, Question, Choice, Response, Answer
 from views.mcq import MCQView
 from views.rating import RatingView
-from views.text import TextModal
-from analytics import mcq_stats, rating_stats, text_answers
+from views.text import TextModal, TextPromptView
+from analytics import mcq_stats, rating_stats, text_answers, build_mcq_field, build_rating_field
 from export import export_csv, export_json
+import utils
+
+# =====================
+# LOGGING SETUP
+# =====================
+_log_level = getattr(logging, LOG_LEVEL, logging.INFO)
+
+logging.basicConfig(
+    level=_log_level,
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler("bot.log", encoding="utf-8"),
+    ],
+)
+log = logging.getLogger("survey_bot")
 
 # =====================
 # BOT SETUP
 # =====================
 intents = discord.Intents.default()
-intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# We will initialize DB in on_ready for async engines if needed, or rely on run_sync.
-# Base.metadata.create_all(bind=engine) will not work synchronously for async engine.
-# We will do this in an async function before bot runs or setup hook.
+# ── Slash-command group ──────────────────────────────────────────────────────
+survey = app_commands.Group(name="survey", description="Survey & Poll system")
+bot.tree.add_command(survey)
+
+
+# =====================
+# SETUP HOOK  (runs once before gateway connects — correct lifecycle)
+# =====================
+@bot.event
+async def setup_hook():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    log.info("Database tables created / verified.")
+
+
+# =====================
+# ON READY
+# =====================
+@bot.event
+async def on_ready():
+    await bot.tree.sync()
+    guild_count = len(bot.guilds)
+    log.info("✅ Bot ready as %s | Serving %d guild(s)", bot.user, guild_count)
+
+
+# =====================
+# GLOBAL ERROR HANDLER
+# =====================
+@bot.tree.error
+async def on_app_command_error(
+    interaction: discord.Interaction, error: app_commands.AppCommandError
+):
+    log.error("Command error in /%s: %s", interaction.command and interaction.command.name, error, exc_info=True)
+    msg = f"❌ **{type(error).__name__}**: {error}"
+
+    # Unwrap CheckFailure to get a cleaner message
+    if isinstance(error, app_commands.CheckFailure):
+        msg = f"🚫 {error}"
+
+    if interaction.response.is_done():
+        await interaction.followup.send(msg, ephemeral=True)
+    else:
+        await interaction.response.send_message(msg, ephemeral=True)
+
 
 # =====================
 # TRANSFORMERS
@@ -31,503 +101,721 @@ class SurveyTransformer(app_commands.Transformer):
     async def autocomplete(self, interaction: discord.Interaction, current: str):
         async with get_session() as session:
             result = await session.execute(
-                select(Survey).filter(Survey.title.ilike(f"%{current}%")).limit(25)
+                select(Survey)
+                .filter(Survey.title.ilike(f"%{current}%"))
+                .order_by(Survey.created_at.desc())
+                .limit(25)
             )
             surveys = result.scalars().all()
-
         return [
-            app_commands.Choice(
-                name=f"{s.id} | {s.title}",
-                value=str(s.id)
-            )
+            app_commands.Choice(name=f"{s.id} │ {s.title[:80]}", value=str(s.id))
             for s in surveys
         ]
 
     async def transform(self, interaction: discord.Interaction, value: str) -> int:
-        return int(value)
+        try:
+            return int(value)
+        except ValueError:
+            raise app_commands.TransformerError(value, type(self), self)
 
 
 class QuestionTransformer(app_commands.Transformer):
     async def autocomplete(self, interaction: discord.Interaction, current: str):
+        # Only show questions from surveys the user created, if possible
         async with get_session() as session:
             result = await session.execute(
-                select(Question).filter(Question.text.ilike(f"%{current}%")).limit(25)
+                select(Question)
+                .join(Survey, Survey.id == Question.survey_id)
+                .filter(
+                    Question.text.ilike(f"%{current}%"),
+                    Survey.creator_id == str(interaction.user.id),
+                )
+                .limit(25)
             )
             questions = result.scalars().all()
-
         return [
-            app_commands.Choice(
-                name=f"{q.id} | {q.text[:80]}",
-                value=str(q.id)
-            )
+            app_commands.Choice(name=f"{q.id} │ {q.text[:80]}", value=str(q.id))
             for q in questions
         ]
 
     async def transform(self, interaction: discord.Interaction, value: str) -> int:
-        return int(value)
+        try:
+            return int(value)
+        except ValueError:
+            raise app_commands.TransformerError(value, type(self), self)
 
-# =====================
-# READY
-# =====================
-@bot.event
-async def on_ready():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    await bot.tree.sync()
-    print(f"✅ Bot ready as {bot.user}")
 
-# =====================
-# ERROR HANDLER
-# =====================
-@bot.tree.error
-async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    print(f"Command Error: {error}")
-    if interaction.response.is_done():
-        await interaction.followup.send(f"❌ Error: {str(error)}", ephemeral=True)
-    else:
-        await interaction.response.send_message(f"❌ Error: {str(error)}", ephemeral=True)
+# ═══════════════════════════════════════════════════════════════════════════
+#  COMMANDS
+# ═══════════════════════════════════════════════════════════════════════════
 
-# =====================
-# COMMAND GROUP
-# =====================
-survey = app_commands.Group(
-    name="survey",
-    description="Survey & Poll system"
-)
-bot.tree.add_command(survey)
-
-# =====================
-# /survey create
-# =====================
+# ── /survey create ────────────────────────────────────────────────────────
 @survey.command(name="create", description="Create a new survey")
+@app_commands.describe(
+    title="Survey title (max 100 chars)",
+    anonymous="Hide respondent names from results",
+    description="Optional short description of the survey",
+)
 async def survey_create(
     interaction: discord.Interaction,
     title: str,
-    anonymous: bool
+    anonymous: bool,
+    description: str | None = None,
 ):
+    title = title.strip()
+    if not title:
+        await interaction.response.send_message("❌ Title cannot be empty.", ephemeral=True)
+        return
+    if len(title) > 100:
+        await interaction.response.send_message(
+            "❌ Title must be 100 characters or fewer.", ephemeral=True
+        )
+        return
+
     async with get_session() as session:
-        survey = Survey(
+        new_survey = Survey(
             title=title,
+            description=description,
             creator_id=str(interaction.user.id),
             is_anonymous=anonymous,
             is_published=False,
-            is_closed=False
+            is_closed=False,
         )
-        session.add(survey)
-        await session.commit()
-        await session.refresh(survey)
+        session.add(new_survey)
+        await session.flush()
+        survey_id    = new_survey.id
+        survey_title = new_survey.title
 
-        survey_id = survey.id
-        survey_title = survey.title
+    embed = discord.Embed(
+        title="✅ Survey Created",
+        color=discord.Color.blurple(),
+    )
+    embed.add_field(name="ID",    value=f"`{survey_id}`",          inline=True)
+    embed.add_field(name="Title", value=survey_title,               inline=True)
+    embed.add_field(name="Mode",  value="Anonymous" if anonymous else "Public", inline=True)
+    if description:
+        embed.add_field(name="Description", value=description, inline=False)
+    embed.set_footer(text="Next: /survey add-question")
 
-        # Private confirmation to creator
-        await interaction.response.send_message(
-            f"✅ สร้างแบบสอบถามเรียบร้อย\n"
-            f"🆔 ID: `{survey_id}`\n"
-            f"👉 ต่อไป: `/survey add-question`",
-            ephemeral=True
-        )
-        
-        # Public announcement
-        await interaction.followup.send(
-            f"📢 **มีแบบสอบถามใหม่**\n"
-            f"📋 {survey_title}\n"
-            f"👤 โดย {interaction.user.mention}"
-        )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(
+        f"📢 **New Survey: {survey_title}**\n"
+        f"👤 Created by {interaction.user.mention}\n"
+        f"*(Use `/survey answer` once published)*"
+    )
 
-# =====================
-# /survey add-question
-# =====================
-@survey.command(name="add-question", description="Add a question to a survey")
+
+# ── /survey add-question ──────────────────────────────────────────────────
+@survey.command(name="add-question", description="Add a question to your survey")
+@app_commands.describe(
+    survey_id="The survey to add a question to",
+    text="The question text",
+    qtype="Question type",
+    order="Display order (lower = earlier, default 0)",
+)
 @app_commands.choices(
     qtype=[
-        app_commands.Choice(name="Single choice", value="mcq"),
-        app_commands.Choice(name="Rating (1–5)", value="rating"),
-        app_commands.Choice(name="Text answer", value="text"),
+        app_commands.Choice(name="Single choice (MCQ)", value="mcq"),
+        app_commands.Choice(name="Rating (1–5 stars)",  value="rating"),
+        app_commands.Choice(name="Text answer",          value="text"),
     ]
 )
 async def add_question(
     interaction: discord.Interaction,
     survey_id: app_commands.Transform[int, SurveyTransformer],
     text: str,
-    qtype: app_commands.Choice[str]
+    qtype: app_commands.Choice[str],
+    order: int = 0,
 ):
     async with get_session() as session:
-        survey = await session.get(Survey, survey_id)
-        if not survey or survey.is_closed:
+        s = await session.get(Survey, survey_id)
+        if not s:
+            await interaction.response.send_message("❌ Survey not found.", ephemeral=True)
+            return
+        if s.creator_id != str(interaction.user.id):
             await interaction.response.send_message(
-                "❌ Survey not found or closed",
-                ephemeral=True
+                "🚫 Only the survey creator can add questions.", ephemeral=True
             )
             return
+        if s.is_closed:
+            await interaction.response.send_message("❌ Cannot modify a closed survey.", ephemeral=True)
+            return
 
-        question = Question(
-            survey_id=survey.id,
-            text=text,
-            qtype=qtype.value
-        )
+        question = Question(survey_id=s.id, text=text, qtype=qtype.value, order=order)
         session.add(question)
-        await session.commit()
+        await session.flush()
+        question_id = question.id
+        survey_title = s.title
 
-        # Private confirmation to creator
-        await interaction.response.send_message(
-            f"✅ เพิ่มคำถามเรียบร้อย\n"
-            f"👉 ถ้าเป็น MCQ: `/survey add-choice`",
-            ephemeral=True
-        )
-        
-        # Public announcement
-        await interaction.followup.send(
-            f"📢 **มีคำถามใหม่ในแบบสอบถาม**\n"
-            f"📋 {survey.title}\n"
-            f"❓ {text}\n"
-            f"👤 โดย {interaction.user.mention}"
-        )
+    embed = discord.Embed(
+        title="✅ Question Added",
+        description=f"**{text}**",
+        color=discord.Color.blurple(),
+    )
+    embed.add_field(name="Type",   value=f"`{qtype.name}`", inline=True)
+    embed.add_field(name="Q ID",   value=f"`{question_id}`", inline=True)
+    embed.add_field(name="Survey", value=survey_title,       inline=True)
+    if qtype.value == "mcq":
+        embed.set_footer(text="Next: /survey add-choice to add options for this question")
 
-# =====================
-# /survey add-choice
-# =====================
-@survey.command(name="add-choice", description="Add choice to a question")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(
+        f"📢 **New question added to \"{survey_title}\"**\n"
+        f"❓ {text} (`{qtype.name}`)\n"
+        f"👤 By {interaction.user.mention}"
+    )
+
+
+# ── /survey add-choice ────────────────────────────────────────────────────
+@survey.command(name="add-choice", description="Add an option to a multiple-choice question")
+@app_commands.describe(
+    question_id="The MCQ question to add a choice to",
+    text="Choice text",
+)
 async def add_choice(
     interaction: discord.Interaction,
     question_id: app_commands.Transform[int, QuestionTransformer],
-    text: str
+    text: str,
 ):
     async with get_session() as session:
         question = await session.get(Question, question_id)
-        if not question or question.qtype != "mcq":
+        if not question:
+            await interaction.response.send_message("❌ Question not found.", ephemeral=True)
+            return
+        if question.qtype != "mcq":
             await interaction.response.send_message(
-                "❌ This question is not multiple-choice",
-                ephemeral=True
+                "❌ This question is not multiple-choice.", ephemeral=True
             )
             return
 
-        choice = Choice(
-            question_id=question.id,
-            text=text
-        )
+        # Verify ownership via the parent survey
+        s = await session.get(Survey, question.survey_id)
+        if s and s.creator_id != str(interaction.user.id):
+            await interaction.response.send_message(
+                "🚫 Only the survey creator can add choices.", ephemeral=True
+            )
+            return
+
+        choice = Choice(question_id=question.id, text=text)
         session.add(choice)
-        await session.commit()
+        await session.flush()
 
-        # Get count using select and count
-        from sqlalchemy import func
-        count_query = select(func.count()).select_from(Choice).filter_by(question_id=question.id)
-        result = await session.execute(count_query)
-        count = result.scalar()
-
-        # Private confirmation to creator
-        await interaction.response.send_message(
-            f"✅ เพิ่มตัวเลือกเรียบร้อย\n"
-            f"ตอนนี้มี **{count} ตัวเลือก**",
-            ephemeral=True
+        result = await session.execute(
+            select(func.count()).select_from(Choice).filter_by(question_id=question.id)
         )
-        
-        # Public announcement
-        await interaction.followup.send(
-            f"📢 **มีตัวเลือกใหม่**\n"
-            f"❓ {question.text}\n"
-            f"➕ {text}\n"
-            f"👤 โดย {interaction.user.mention}"
-        )
+        count = result.scalar() or 0
+        question_text = question.text
 
-# =====================
-# /survey preview
-# =====================
-@survey.command(name="preview", description="Preview a survey")
+    embed = discord.Embed(
+        title="✅ Choice Added",
+        color=discord.Color.blurple(),
+    )
+    embed.add_field(name="Question", value=question_text, inline=False)
+    embed.add_field(name="Choice",   value=text,          inline=True)
+    embed.add_field(name="Total",    value=f"{count} option(s)", inline=True)
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(
+        f"📢 **New choice added**\n"
+        f"❓ {question_text}\n"
+        f"➕ **{text}** (now {count} option(s))\n"
+        f"👤 By {interaction.user.mention}"
+    )
+
+
+# ── /survey preview ───────────────────────────────────────────────────────
+@survey.command(name="preview", description="Preview a survey before publishing")
+@app_commands.describe(survey_id="Survey to preview")
 async def preview(
     interaction: discord.Interaction,
-    survey_id: app_commands.Transform[int, SurveyTransformer]
+    survey_id: app_commands.Transform[int, SurveyTransformer],
 ):
     async with get_session() as session:
-        survey = await session.get(Survey, survey_id)
-        if not survey:
-            await interaction.response.send_message("❌ Survey not found", ephemeral=True)
+        s = await session.get(Survey, survey_id)
+        if not s:
+            await interaction.response.send_message("❌ Survey not found.", ephemeral=True)
             return
 
-        result = await session.execute(select(Question).filter_by(survey_id=survey.id))
+        result = await session.execute(
+            select(Question).filter_by(survey_id=s.id).order_by(Question.order, Question.id)
+        )
         questions = result.scalars().all()
 
+        status_str = "⚪ Draft"
+        if s.is_closed:    status_str = "🔴 Closed"
+        elif s.is_published: status_str = "🟢 Published"
+
         embed = discord.Embed(
-            title=f"📋 {survey.title}",
-            description="Survey Preview",
-            color=discord.Color.blue()
+            title=f"📋 Preview: {s.title}",
+            description=s.description or "*No description.*",
+            color=discord.Color.og_blurple(),
         )
+        embed.add_field(name="Status",    value=status_str,                         inline=True)
+        embed.add_field(name="Mode",      value="Anonymous" if s.is_anonymous else "Public", inline=True)
+        embed.add_field(name="Questions", value=str(len(questions)),                 inline=True)
 
         if not questions:
-            embed.add_field(
-                name="No questions yet",
-                value="Use `/survey add-question`",
-                inline=False
-            )
+            embed.add_field(name="⚠️ No questions", value="Use `/survey add-question`", inline=False)
+        else:
+            for i, q in enumerate(questions, 1):
+                qtype_label = {"mcq": "🔘 MCQ", "rating": "⭐ Rating", "text": "📝 Text"}.get(q.qtype, q.qtype)
+                embed.add_field(name=f"{i}. {q.text[:80]}", value=qtype_label, inline=False)
 
-        for i, q in enumerate(questions, start=1):
-            embed.add_field(
-                name=f"{i}. {q.text}",
-                value=f"Type: `{q.qtype}`",
-                inline=False
-            )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
-        await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# =====================
-# /survey publish
-# =====================
-@survey.command(name="publish", description="Publish a survey")
+# ── /survey publish ───────────────────────────────────────────────────────
+@survey.command(name="publish", description="Publish a survey so others can answer it")
+@app_commands.describe(survey_id="Survey to publish")
 async def publish(
     interaction: discord.Interaction,
-    survey_id: app_commands.Transform[int, SurveyTransformer]
+    survey_id: app_commands.Transform[int, SurveyTransformer],
 ):
     async with get_session() as session:
-        survey = await session.get(Survey, survey_id)
-        if not survey:
-            await interaction.response.send_message("❌ Survey not found", ephemeral=True)
+        s = await session.get(Survey, survey_id)
+        if not s:
+            await interaction.response.send_message("❌ Survey not found.", ephemeral=True)
+            return
+        if s.creator_id != str(interaction.user.id):
+            await interaction.response.send_message(
+                "🚫 Only the creator can publish this survey.", ephemeral=True
+            )
+            return
+        if s.is_closed:
+            await interaction.response.send_message(
+                "❌ Cannot publish a closed survey. Use `/survey reopen` first.", ephemeral=True
+            )
             return
 
-        survey.is_published = True
-        await session.commit()
+        # Guard: must have at least one question
+        q_count = await get_question_count(session, s.id)
+        if q_count == 0:
+            await interaction.response.send_message(
+                "❌ Add at least one question before publishing.", ephemeral=True
+            )
+            return
 
-        # Private confirmation to creator
-        await interaction.response.send_message(
-            f"✅ เผยแพร่แบบสอบถามเรียบร้อย",
-            ephemeral=True
-        )
-        
-        # Public announcement
-        await interaction.followup.send(
-            f"🚀 **แบบสอบถามเปิดให้ตอบแล้ว!**\n"
-            f"📋 {survey.title}\n"
-            f"👉 พิมพ์ `/survey answer` เพื่อตอบ\n"
-            f"👤 โดย {interaction.user.mention}"
-        )
+        s.is_published = True
+        survey_title = s.title
 
-# =====================
-# /survey answer
-# =====================
-@survey.command(name="answer", description="Answer a survey")
+    embed = discord.Embed(
+        title="🚀 Survey Published!",
+        description=f"**{survey_title}** is now open for responses.",
+        color=discord.Color.green(),
+    )
+    embed.add_field(name="Questions", value=str(q_count), inline=True)
+    embed.set_footer(text="Respondents can use /survey answer to participate.")
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(
+        f"🚀 **Survey now live: {survey_title}**\n"
+        f"📋 {q_count} question(s) | Use `/survey answer` to participate!\n"
+        f"👤 By {interaction.user.mention}"
+    )
+
+
+# ── /survey answer ────────────────────────────────────────────────────────
+@survey.command(name="answer", description="Answer a published survey")
+@app_commands.describe(survey_id="Survey to answer")
 async def answer(
     interaction: discord.Interaction,
-    survey_id: app_commands.Transform[int, SurveyTransformer]
+    survey_id: app_commands.Transform[int, SurveyTransformer],
 ):
+    # Defer immediately to avoid the 3-second Discord timeout during DB queries
+    await interaction.response.defer(ephemeral=True)
+
     async with get_session() as session:
-        survey = await session.get(Survey, survey_id)
-        if not survey or not survey.is_published or survey.is_closed:
-            await interaction.response.send_message(
-                "❌ Survey is not available",
-                ephemeral=True
+        s = await session.get(Survey, survey_id)
+        if not s or not s.is_published or s.is_closed:
+            await interaction.followup.send(
+                "❌ This survey is not available.", ephemeral=True
             )
+            return
+
+        q_count  = await get_question_count(session, s.id)
+        if q_count == 0:
+            await interaction.followup.send("❌ This survey has no questions.", ephemeral=True)
             return
 
         from database import get_next_question
-        import utils
-        
-        next_q = await get_next_question(
-            session=session,
-            survey_id=survey.id,
-            user_id=str(interaction.user.id)
+        next_q = await get_next_question(session, s.id, str(interaction.user.id))
+
+    if not next_q:
+        embed = discord.Embed(
+            title="🎉 Already Completed!",
+            description="You have already answered all questions in this survey.",
+            color=discord.Color.green(),
         )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        return
 
-        if not next_q:
-            # Maybe they haven't started, or there are no questions
-            result = await session.execute(
-                select(Question).filter_by(survey_id=survey.id)
-            )
-            has_questions = result.scalars().first()
-            if not has_questions:
-                await interaction.response.send_message(
-                    "❌ Survey has no questions",
-                    ephemeral=True
-                )
-                return
-            # Otherwise, they finished the survey already
-            await interaction.response.send_message(
-                "🎉 **Survey Completed!** You have already answered all questions.",
-                ephemeral=True
-            )
-            return
-
-        await utils.send_question_ui(
-            interaction=interaction,
-            session=session,
-            survey_id=survey.id,
-            question=next_q,
-            is_edit=False
+    # Figure out which question number we're on
+    async with get_session() as session:
+        result = await session.execute(
+            select(Question)
+            .filter_by(survey_id=survey_id)
+            .order_by(Question.order, Question.id)
         )
+        all_questions = result.scalars().all()
 
-# =====================
-# /survey close
-# =====================
-@survey.command(name="close", description="Close a survey")
+    current_num = next((i + 1 for i, q in enumerate(all_questions) if q.id == next_q.id), 1)
+
+    await utils.send_question_ui(
+        interaction=interaction,
+        survey_id=survey_id,
+        question=next_q,
+        user_id=str(interaction.user.id),
+        current_num=current_num,
+        total=q_count,
+        is_edit=False,
+    )
+
+
+# ── /survey close ─────────────────────────────────────────────────────────
+@survey.command(name="close", description="Close a survey (stops new responses)")
+@app_commands.describe(survey_id="Survey to close")
 async def close(
     interaction: discord.Interaction,
-    survey_id: app_commands.Transform[int, SurveyTransformer]
+    survey_id: app_commands.Transform[int, SurveyTransformer],
 ):
     async with get_session() as session:
-        survey = await session.get(Survey, survey_id)
-        if not survey:
-            await interaction.response.send_message("❌ Survey not found", ephemeral=True)
+        s = await session.get(Survey, survey_id)
+        if not s:
+            await interaction.response.send_message("❌ Survey not found.", ephemeral=True)
+            return
+        if s.creator_id != str(interaction.user.id):
+            await interaction.response.send_message(
+                "🚫 Only the creator can close this survey.", ephemeral=True
+            )
             return
 
-        survey.is_closed = True
-        await session.commit()
+        s.is_closed    = True
+        s.is_published = False
+        survey_title   = s.title
 
-        # Private confirmation to creator
-        await interaction.response.send_message(
-            f"✅ ปิดแบบสอบถามเรียบร้อย",
-            ephemeral=True
-        )
-        
-        # Public announcement
-        await interaction.followup.send(
-            f"🔒 **ปิดแบบสอบถามแล้ว**\n"
-            f"📋 {survey.title}\n"
-            f"👤 โดย {interaction.user.mention}"
-        )
+    embed = discord.Embed(
+        title="🔒 Survey Closed",
+        description=f"**{survey_title}** is now closed.",
+        color=discord.Color.red(),
+    )
+    embed.set_footer(text="Use /survey reopen to re-open it.")
 
-# =====================
-# /survey list
-# =====================
-@survey.command(name="list", description="List your surveys")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(
+        f"🔒 **Survey closed: {survey_title}**\n"
+        f"👤 By {interaction.user.mention}"
+    )
+
+
+# ── /survey reopen ────────────────────────────────────────────────────────
+@survey.command(name="reopen", description="Reopen a closed survey")
+@app_commands.describe(survey_id="Survey to reopen")
+async def reopen(
+    interaction: discord.Interaction,
+    survey_id: app_commands.Transform[int, SurveyTransformer],
+):
+    async with get_session() as session:
+        s = await session.get(Survey, survey_id)
+        if not s:
+            await interaction.response.send_message("❌ Survey not found.", ephemeral=True)
+            return
+        if s.creator_id != str(interaction.user.id):
+            await interaction.response.send_message(
+                "🚫 Only the creator can reopen this survey.", ephemeral=True
+            )
+            return
+        if not s.is_closed:
+            await interaction.response.send_message(
+                "ℹ️ Survey is not closed.", ephemeral=True
+            )
+            return
+
+        s.is_closed    = False
+        s.is_published = True
+        survey_title   = s.title
+
+    embed = discord.Embed(
+        title="🔓 Survey Reopened",
+        description=f"**{survey_title}** is open for responses again.",
+        color=discord.Color.green(),
+    )
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(
+        f"🔓 **Survey reopened: {survey_title}**\n"
+        f"👤 By {interaction.user.mention}\n"
+        f"Use `/survey answer` to participate!"
+    )
+
+
+# ── /survey list ──────────────────────────────────────────────────────────
+@survey.command(name="list", description="List all surveys you created")
 async def list_surveys(interaction: discord.Interaction):
     async with get_session() as session:
         result = await session.execute(
-            select(Survey).filter_by(creator_id=str(interaction.user.id))
+            select(Survey)
+            .filter_by(creator_id=str(interaction.user.id))
+            .order_by(Survey.created_at.desc())
         )
         surveys = result.scalars().all()
 
-        if not surveys:
-            await interaction.response.send_message("❌ You have no surveys.", ephemeral=True)
-            return
-
-        embed = discord.Embed(
-            title="📊 Your Surveys",
-            color=discord.Color.green()
-        )
-        for s in surveys:
-            status = "🟢 Published" if s.is_published else "⚪ Draft"
-            if s.is_closed:
-                status = "🔴 Closed"
-            embed.add_field(
-                name=f"ID: {s.id} | {s.title}",
-                value=f"Status: {status}",
-                inline=False
-            )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-# =====================
-# /survey results
-# =====================
-@survey.command(name="results", description="View survey results")
-async def results(
-    interaction: discord.Interaction,
-    survey_id: app_commands.Transform[int, SurveyTransformer]
-):
-    async with get_session() as session:
-        survey = await session.get(Survey, survey_id)
-        if not survey:
-            await interaction.response.send_message("❌ Survey not found", ephemeral=True)
-            return
-        
-        if survey.creator_id != str(interaction.user.id):
-            await interaction.response.send_message("❌ Only the creator can view results", ephemeral=True)
-            return
-
-        result = await session.execute(select(Question).filter_by(survey_id=survey.id))
-        questions = result.scalars().all()
+    if not surveys:
+        await interaction.response.send_message("❌ You have no surveys yet.", ephemeral=True)
+        return
 
     embed = discord.Embed(
-        title=f"📈 Results: {survey.title}",
-        color=discord.Color.purple()
+        title="📊 Your Surveys",
+        description=f"You have **{len(surveys)}** survey(s).",
+        color=discord.Color.blurple(),
+    )
+
+    for s in surveys[:20]:   # cap at 20 to keep embed within Discord limits
+        if s.is_closed:
+            status = "🔴 Closed"
+        elif s.is_published:
+            status = "🟢 Published"
+        else:
+            status = "⚪ Draft"
+
+        embed.add_field(
+            name=f"ID {s.id} — {s.title[:60]}",
+            value=status,
+            inline=True,
+        )
+
+    if len(surveys) > 20:
+        embed.set_footer(text=f"Showing 20 of {len(surveys)} surveys.")
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# ── /survey info ──────────────────────────────────────────────────────────
+@survey.command(name="info", description="Show full details of a survey")
+@app_commands.describe(survey_id="Survey to inspect")
+async def info(
+    interaction: discord.Interaction,
+    survey_id: app_commands.Transform[int, SurveyTransformer],
+):
+    async with get_session() as session:
+        s = await session.get(Survey, survey_id)
+        if not s:
+            await interaction.response.send_message("❌ Survey not found.", ephemeral=True)
+            return
+
+        q_count  = await get_question_count(session, s.id)
+        r_count  = await get_response_count(session, s.id)
+
+    if s.is_closed:
+        status_str = "🔴 Closed"
+        color      = discord.Color.red()
+    elif s.is_published:
+        status_str = "🟢 Published"
+        color      = discord.Color.green()
+    else:
+        status_str = "⚪ Draft"
+        color      = discord.Color.greyple()
+
+    embed = discord.Embed(
+        title=f"📋 {s.title}",
+        description=s.description or "*No description.*",
+        color=color,
+    )
+    embed.add_field(name="Status",     value=status_str,                              inline=True)
+    embed.add_field(name="Mode",       value="Anonymous" if s.is_anonymous else "Public", inline=True)
+    embed.add_field(name="Creator",    value=f"<@{s.creator_id}>",                   inline=True)
+    embed.add_field(name="Questions",  value=str(q_count),                            inline=True)
+    embed.add_field(name="Responses",  value=str(r_count),                            inline=True)
+    embed.add_field(name="Survey ID",  value=f"`{s.id}`",                             inline=True)
+    embed.set_footer(text=f"Created {s.created_at.strftime('%Y-%m-%d %H:%M UTC') if s.created_at else 'unknown'}")
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# ── /survey results ───────────────────────────────────────────────────────
+@survey.command(name="results", description="View results for your survey")
+@app_commands.describe(survey_id="Survey to view results for")
+async def results(
+    interaction: discord.Interaction,
+    survey_id: app_commands.Transform[int, SurveyTransformer],
+):
+    await interaction.response.defer(ephemeral=True)
+
+    async with get_session() as session:
+        s = await session.get(Survey, survey_id)
+        if not s:
+            await interaction.followup.send("❌ Survey not found.", ephemeral=True)
+            return
+        if s.creator_id != str(interaction.user.id):
+            await interaction.followup.send(
+                "🚫 Only the creator can view results.", ephemeral=True
+            )
+            return
+
+        result = await session.execute(
+            select(Question)
+            .filter_by(survey_id=s.id)
+            .order_by(Question.order, Question.id)
+        )
+        questions = result.scalars().all()
+        r_count = await get_response_count(session, s.id)
+
+    embed = discord.Embed(
+        title=f"📈 Results: {s.title}",
+        description=f"**{r_count}** respondent(s)",
+        color=discord.Color.purple(),
     )
 
     for q in questions:
         if q.qtype == "mcq":
             stats = await mcq_stats(q.id)
-            text = "\n".join(f"{k}: {v}" for k, v in stats.items()) or "No answers"
-            embed.add_field(name=q.text, value=f"```\n{text}\n```", inline=False)
+            value = build_mcq_field(stats)
         elif q.qtype == "rating":
             stats = await rating_stats(q.id)
-            if stats["count"] > 0:
-                text = f"Count: {stats['count']}\nAvg: {stats['mean']} ⭐\nMin: {stats['min']} | Max: {stats['max']}"
-            else:
-                text = "No answers"
-            embed.add_field(name=q.text, value=f"```\n{text}\n```", inline=False)
+            value = build_rating_field(stats)
         elif q.qtype == "text":
             answers = await text_answers(q.id)
-            ans_count = len(answers)
-            if ans_count > 0:
-                text = f"{ans_count} response(s)\n" + "\n".join(f"- {str(a)[:30]}..." for a in answers[:3])
+            if answers:
+                previews = "\n".join(f"• {str(a)[:50]}…" if len(str(a)) > 50 else f"• {a}" for a in answers[:5])
+                value = f"{len(answers)} response(s)\n{previews}"
+                if len(answers) > 5:
+                    value += f"\n_…and {len(answers) - 5} more_"
             else:
-                text = "No answers"
-            embed.add_field(name=q.text, value=f"```\n{text}\n```", inline=False)
+                value = "No answers yet."
+        else:
+            value = "Unknown question type."
 
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+        embed.add_field(name=f"❓ {q.text[:80]}", value=value[:1024], inline=False)
 
-# =====================
-# /survey export
-# =====================
-@survey.command(name="export", description="Export survey results")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# ── /survey export ────────────────────────────────────────────────────────
+@survey.command(name="export", description="Export survey results as CSV or JSON")
+@app_commands.describe(
+    survey_id="Survey to export",
+    format="Export format",
+)
 @app_commands.choices(
     format=[
-        app_commands.Choice(name="CSV", value="csv"),
-        app_commands.Choice(name="JSON", value="json"),
+        app_commands.Choice(name="CSV  (Excel-friendly)", value="csv"),
+        app_commands.Choice(name="JSON (API-friendly)",   value="json"),
     ]
 )
 async def export_cmd(
     interaction: discord.Interaction,
     survey_id: app_commands.Transform[int, SurveyTransformer],
-    format: app_commands.Choice[str]
+    format: app_commands.Choice[str],
 ):
-    async with get_session() as session:
-        survey = await session.get(Survey, survey_id)
-        if not survey:
-            await interaction.response.send_message("❌ Survey not found", ephemeral=True)
-            return
-        
-        if survey.creator_id != str(interaction.user.id):
-            await interaction.response.send_message("❌ Only the creator can export results", ephemeral=True)
-            return
-
     await interaction.response.defer(ephemeral=True)
 
+    async with get_session() as session:
+        s = await session.get(Survey, survey_id)
+        if not s:
+            await interaction.followup.send("❌ Survey not found.", ephemeral=True)
+            return
+        if s.creator_id != str(interaction.user.id):
+            await interaction.followup.send(
+                "🚫 Only the creator can export results.", ephemeral=True
+            )
+            return
+        survey_title = s.title
+
+    path: str | None = None
     try:
         if format.value == "csv":
-            path = await export_csv(survey.id)
+            path = await export_csv(survey_id)
         else:
-            path = await export_json(survey.id)
+            path = await export_json(survey_id)
 
-        file = discord.File(path)
-        await interaction.followup.send(f"✅ Exported {format.name}", file=file)
-        os.remove(path)
+        file = discord.File(path, filename=f"{survey_title[:40]}.{format.value}")
+        await interaction.followup.send(
+            f"✅ Exported **{survey_title}** as {format.name}",
+            file=file,
+            ephemeral=True,
+        )
     except Exception as e:
-        await interaction.followup.send(f"❌ Failed to export: {e}")
+        log.error("Export failed for survey %d: %s", survey_id, e, exc_info=True)
+        await interaction.followup.send(f"❌ Export failed: {e}", ephemeral=True)
+    finally:
+        if path and os.path.exists(path):
+            os.unlink(path)
 
-# =====================
-# /survey delete
-# =====================
-@survey.command(name="delete", description="Delete a survey")
+
+# ── /survey delete ────────────────────────────────────────────────────────
+class ConfirmDeleteView(discord.ui.View):
+    """Confirmation dialog before permanent deletion."""
+
+    def __init__(self, survey_id: int, survey_title: str, creator_id: str):
+        super().__init__(timeout=30)
+        self.survey_id    = survey_id
+        self.survey_title = survey_title
+        self.creator_id   = creator_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if str(interaction.user.id) != self.creator_id:
+            await interaction.response.send_message(
+                "❌ Only the survey creator can confirm this.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="🗑️ Yes, Delete", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with get_session() as session:
+            s = await session.get(Survey, self.survey_id)
+            if s:
+                await session.delete(s)
+
+        embed = discord.Embed(
+            title="🗑️ Survey Deleted",
+            description=f"**{self.survey_title}** has been permanently deleted.",
+            color=discord.Color.red(),
+        )
+        await interaction.response.edit_message(embed=embed, view=None, content=None)
+        self.stop()
+
+    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="↩️ Cancelled",
+            description="The survey was not deleted.",
+            color=discord.Color.greyple(),
+        )
+        await interaction.response.edit_message(embed=embed, view=None, content=None)
+        self.stop()
+
+
+@survey.command(name="delete", description="Permanently delete a survey")
+@app_commands.describe(survey_id="Survey to delete")
 async def delete(
     interaction: discord.Interaction,
-    survey_id: app_commands.Transform[int, SurveyTransformer]
+    survey_id: app_commands.Transform[int, SurveyTransformer],
 ):
     async with get_session() as session:
-        survey = await session.get(Survey, survey_id)
-        if not survey:
-            await interaction.response.send_message("❌ Survey not found", ephemeral=True)
+        s = await session.get(Survey, survey_id)
+        if not s:
+            await interaction.response.send_message("❌ Survey not found.", ephemeral=True)
             return
-
-        if survey.creator_id != str(interaction.user.id):
-            await interaction.response.send_message("❌ Only the creator can delete", ephemeral=True)
+        if s.creator_id != str(interaction.user.id):
+            await interaction.response.send_message(
+                "🚫 Only the creator can delete this survey.", ephemeral=True
+            )
             return
+        survey_title = s.title
 
-        await session.delete(survey)
-        await session.commit()
+    embed = discord.Embed(
+        title="⚠️ Confirm Deletion",
+        description=(
+            f"Are you sure you want to permanently delete **{survey_title}**?\n"
+            "This will remove **all questions, choices, and responses**. This cannot be undone."
+        ),
+        color=discord.Color.orange(),
+    )
+    view = ConfirmDeleteView(survey_id, survey_title, str(interaction.user.id))
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-        await interaction.response.send_message(
-            f"🗑️ ลบแบบสอบถาม `{survey.title}` เรียบร้อย",
-            ephemeral=True
-        )
 
 # =====================
 # RUN
 # =====================
-bot.run(DISCORD_TOKEN)
+bot.run(DISCORD_TOKEN, log_handler=None)   # log_handler=None → use our own logging config
