@@ -55,9 +55,12 @@ class TextModal(discord.ui.Modal):
         )
 
     async def on_error(self, interaction: discord.Interaction, error: Exception):
-        await interaction.response.send_message(
-            f"❌ An error occurred: {error}", ephemeral=True
-        )
+        from database import log
+        log.error("Modal error: %s", error, exc_info=True)
+        if interaction.response.is_done():
+            await interaction.followup.send(f"❌ An error occurred: {error}", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"❌ An error occurred: {error}", ephemeral=True)
 
 
 class TextPromptView(discord.ui.View):

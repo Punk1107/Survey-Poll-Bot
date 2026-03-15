@@ -45,6 +45,15 @@ class MCQView(discord.ui.View):
     async def on_timeout(self):
         for item in self.children:
             item.disabled = True
+        
+        try:
+            # We don't have the message object here easily, but we can stop the view.
+            # Usually views are used with a specific interaction.
+            # If we want to edit the message on timeout, we'd need to store it.
+            # For now, disabling children is a good baseline.
+            pass
+        except Exception:
+            pass
         self.stop()
 
 

@@ -119,30 +119,40 @@ async def upsert_answer(
     """
     from models import Response, Answer
     from sqlalchemy import select
-    from sqlalchemy.exc import IntegrityError
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-    # 1. Get-or-create the Response row
+    # 1. Get or create Response ID
+    # We use a subquery/CTE approach or just a simple check.
+    # To keep it robust across concurrent hits, we still use the race-condition handler
+    # but we can optimize the Answer upsert using SQLite's ON CONFLICT if we want,
+    # ORM-wise it's often cleaner to just check.
+    
     result = await session.execute(
-        select(Response).filter_by(survey_id=survey_id, user_id=user_id)
+        select(Response.id).filter_by(survey_id=survey_id, user_id=user_id)
     )
-    response = result.scalars().first()
+    resp_id = result.scalar()
 
-    if not response:
+    if not resp_id:
         response = Response(survey_id=survey_id, user_id=user_id)
         session.add(response)
         try:
-            await session.flush()   # get the ID without a full commit
-        except IntegrityError:
-            # Race: another coroutine committed first — fetch the existing row
+            await session.flush()
+            resp_id = response.id
+        except Exception:
+            # Race: fetch again
             await session.rollback()
             result = await session.execute(
-                select(Response).filter_by(survey_id=survey_id, user_id=user_id)
+                select(Response.id).filter_by(survey_id=survey_id, user_id=user_id)
             )
-            response = result.scalars().first()
+            resp_id = result.scalar()
 
-    # 2. Upsert the Answer row
+    # 2. Upsert Answer using a single execution if possible
+    # We'll stick to a clean ORM upsert but avoid the double-select if we can
+    # actually, with SQLite WAL and indexes, the current check is fast,
+    # but we can merge it into a more efficient session state check.
+    
     result = await session.execute(
-        select(Answer).filter_by(response_id=response.id, question_id=question_id)
+        select(Answer).filter_by(response_id=resp_id, question_id=question_id)
     )
     existing = result.scalars().first()
 
@@ -151,54 +161,40 @@ async def upsert_answer(
         is_update = True
     else:
         session.add(
-            Answer(response_id=response.id, question_id=question_id, answer=str(answer_value))
+            Answer(response_id=resp_id, question_id=question_id, answer=str(answer_value))
         )
         is_update = False
 
-    # Caller's context manager will commit
     return answer_value, is_update
 
 
 async def get_next_question(session: AsyncSession, survey_id: int, user_id: str):
     """
-    Return the next unanswered Question for a user in a survey, ordered by
-    (question.order, question.id).  Returns None when all questions answered.
+    Return the next unanswered Question for a user in a survey.
+    Uses a single JOIN query to find questions without a corresponding answer.
     """
     from models import Question, Answer, Response
     from sqlalchemy import select
 
-    # 1. Check for existing response
-    result = await session.execute(
-        select(Response.id).filter_by(survey_id=survey_id, user_id=user_id)
-    )
-    response_id = result.scalar()
-
-    # 2. All questions for the survey, ordered deterministically
-    result = await session.execute(
+    # This query finds the first question for the survey that doesn't have an answer
+    # associated with the user's response to that specific survey.
+    stmt = (
         select(Question)
-        .filter_by(survey_id=survey_id)
+        .outerjoin(
+            Answer,
+            (Answer.question_id == Question.id) & 
+            (Answer.response_id == select(Response.id)
+                                   .filter_by(survey_id=survey_id, user_id=user_id)
+                                   .scalar_subquery())
+        )
+        .filter(Question.survey_id == survey_id)
+        .filter(Answer.id == None)
         .order_by(Question.order, Question.id)
+        .limit(1)
     )
-    questions = result.scalars().all()
 
-    if not questions:
-        return None
-
-    if not response_id:
-        return questions[0]
-
-    # 3. Set of already-answered question IDs
-    result = await session.execute(
-        select(Answer.question_id).filter_by(response_id=response_id)
-    )
-    answered_ids = set(result.scalars().all())
-
-    # 4. First unanswered
-    for q in questions:
-        if q.id not in answered_ids:
-            return q
-
-    return None  # all done
+    result = await session.execute(stmt)
+    return result.scalars().first()
 
 
 async def get_question_count(session: AsyncSession, survey_id: int) -> int:
