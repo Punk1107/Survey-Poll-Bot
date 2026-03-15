@@ -84,16 +84,23 @@ async def on_app_command_error(
     interaction: discord.Interaction, error: app_commands.AppCommandError
 ):
     log.error("Command error in /%s: %s", interaction.command and interaction.command.name, error, exc_info=True)
-    msg = f"❌ **{type(error).__name__}**: {error}"
-
-    # Unwrap CheckFailure to get a cleaner message
-    if isinstance(error, app_commands.CheckFailure):
+    
+    if isinstance(error, app_commands.CommandInvokeError):
+        # Handle specific DB or logic errors
+        original = error.original
+        msg = f"❌ **Error**: {original}"
+    elif isinstance(error, app_commands.CheckFailure):
         msg = f"🚫 {error}"
-
-    if interaction.response.is_done():
-        await interaction.followup.send(msg, ephemeral=True)
     else:
-        await interaction.response.send_message(msg, ephemeral=True)
+        msg = f"❌ **{type(error).__name__}**: {error}"
+
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except discord.HTTPException:
+        pass # Silent fail if interaction expired
 
 
 # =====================
@@ -102,13 +109,15 @@ async def on_app_command_error(
 class SurveyTransformer(app_commands.Transformer):
     async def autocomplete(self, interaction: discord.Interaction, current: str):
         async with get_session() as session:
+            # Optimize: only select id and title, limit results
+            # ilike with index-friendly patterns if possible
             result = await session.execute(
-                select(Survey)
+                select(Survey.id, Survey.title)
                 .filter(Survey.title.ilike(f"%{current}%"))
                 .order_by(Survey.created_at.desc())
                 .limit(25)
             )
-            surveys = result.scalars().all()
+            surveys = result.all()
         return [
             app_commands.Choice(name=f"{s.id} │ {s.title[:80]}", value=str(s.id))
             for s in surveys
@@ -126,7 +135,7 @@ class QuestionTransformer(app_commands.Transformer):
         # Only show questions from surveys the user created, if possible
         async with get_session() as session:
             result = await session.execute(
-                select(Question)
+                select(Question.id, Question.text)
                 .join(Survey, Survey.id == Question.survey_id)
                 .filter(
                     Question.text.ilike(f"%{current}%"),
@@ -134,7 +143,7 @@ class QuestionTransformer(app_commands.Transformer):
                 )
                 .limit(25)
             )
-            questions = result.scalars().all()
+            questions = result.all()
         return [
             app_commands.Choice(name=f"{q.id} │ {q.text[:80]}", value=str(q.id))
             for q in questions

@@ -83,14 +83,15 @@ async def send_question_ui(
         from views.mcq import MCQView
         from database import get_session
         async with get_session() as session:
+            # Optimize: use select_from and filter_by for clarity
             result = await session.execute(
-                select(Choice).filter_by(question_id=question.id)
+                select(Choice.text).filter_by(question_id=question.id)
             )
             choices = result.scalars().all()
         view = MCQView(
             survey_id=survey_id,
             question_id=question.id,
-            options=[c.text for c in choices],
+            options=choices,
             user_id=user_id,
             question_num=current_num,
             total=total,
