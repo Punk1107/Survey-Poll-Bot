@@ -1,7 +1,11 @@
+import logging
+
 import discord
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from models import Question, Choice
+
+log = logging.getLogger(__name__)
 
 # Question-type colours
 _QTYPE_COLOR = {
@@ -83,11 +87,25 @@ async def send_question_ui(
         from views.mcq import MCQView
         from database import get_session
         async with get_session() as session:
-            # Optimize: use select_from and filter_by for clarity
             result = await session.execute(
                 select(Choice.text).filter_by(question_id=question.id)
             )
-            choices = result.scalars().all()
+            choices = list(result.scalars().all())
+
+        # BUG FIX: Discord forbids a Select with zero options. Guard here
+        # so a misconfigured MCQ question gets a clear error instead of a crash.
+        if not choices:
+            error_embed = discord.Embed(
+                title="⚠️ Question Setup Incomplete",
+                description=(
+                    f"The question **\"{question.text}\"** has no choices configured. "
+                    "Please ask the survey creator to add choices via `/survey add-choice`."
+                ),
+                color=discord.Color.orange(),
+            )
+            await _send(interaction, embed=error_embed, view=None, is_edit=is_edit)
+            return
+
         view = MCQView(
             survey_id=survey_id,
             question_id=question.id,
@@ -134,19 +152,29 @@ async def send_question_ui(
         )
         await _send(interaction, embed=embed, view=view, is_edit=is_edit)
 
+    else:
+        log.warning("Unknown question type '%s' for question id=%d", question.qtype, question.id)
+        unknown_embed = discord.Embed(
+            title="⚠️ Unknown Question Type",
+            description=f"Question type `{question.qtype}` is not supported.",
+            color=discord.Color.orange(),
+        )
+        await _send(interaction, embed=unknown_embed, view=None, is_edit=is_edit)
+
 
 async def _send(
     interaction: discord.Interaction,
     embed: discord.Embed,
-    view: discord.ui.View,
+    view: discord.ui.View | None,
     is_edit: bool,
 ):
     """Central dispatcher — handles edit vs. new message vs. followup."""
+    kwargs = {"embed": embed, "view": view, "content": None}
     if is_edit and not interaction.response.is_done():
-        await interaction.response.edit_message(embed=embed, view=view, content=None)
+        await interaction.response.edit_message(**kwargs)
     elif interaction.response.is_done():
         try:
-            await interaction.edit_original_response(embed=embed, view=view, content=None)
+            await interaction.edit_original_response(**kwargs)
         except discord.NotFound:
             await interaction.followup.send(embed=embed, view=view, ephemeral=True)
     else:

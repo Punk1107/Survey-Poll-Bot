@@ -1,19 +1,23 @@
+import logging
+
 import discord
 from database import get_session, upsert_answer, get_next_question
 import utils
 
-# Rating emoji labels per value
+log = logging.getLogger(__name__)
+
+# Rating emoji labels per value — consistent emoji for 1-5, numeric for 6-10
 _RATING_EMOJI = {
     1:  "⭐",
     2:  "⭐⭐",
     3:  "⭐⭐⭐",
     4:  "⭐⭐⭐⭐",
     5:  "⭐⭐⭐⭐⭐",
-    6:  "6",
-    7:  "7",
-    8:  "8",
-    9:  "9",
-    10: "10",
+    6:  "6️⃣",
+    7:  "7️⃣",
+    8:  "8️⃣",
+    9:  "9️⃣",
+    10: "🔟",
 }
 
 # Button colors: 1-3 green, 4-7 blurple, 8-10 red (difficulty gradient)
@@ -41,6 +45,8 @@ class RatingView(discord.ui.View):
         self.user_id      = user_id
         self.question_num = question_num
         self.total        = total
+        # Store the message so on_timeout can edit it to show disabled buttons
+        self.message: discord.Message | None = None
 
         for i in range(1, scale + 1):
             self.add_item(
@@ -61,9 +67,29 @@ class RatingView(discord.ui.View):
         return True
 
     async def on_timeout(self):
+        """Disable all buttons when the view times out."""
         for item in self.children:
             item.disabled = True
         self.stop()
+        # FIX: Actually edit the message so users see the disabled state.
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except (discord.NotFound, discord.HTTPException):
+                pass
+
+    async def on_error(
+        self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item
+    ):
+        log.error("RatingView error on item %s: %s", item, error, exc_info=True)
+        msg = "❌ An error occurred while recording your rating. Please try again."
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+        except discord.HTTPException:
+            pass
 
 
 class RatingButton(discord.ui.Button):

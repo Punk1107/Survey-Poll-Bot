@@ -61,7 +61,7 @@ class Response(Base):
 
     id           = Column(Integer, primary_key=True)
     survey_id    = Column(Integer, ForeignKey("surveys.id", ondelete="CASCADE"), index=True)
-    user_id      = Column(String, nullable=True, index=True)
+    user_id      = Column(String, nullable=False, index=True)
     submitted_at = Column(DateTime(timezone=True), default=_utcnow)
 
     survey  = relationship("Survey",  back_populates="responses")

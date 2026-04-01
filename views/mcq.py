@@ -1,6 +1,10 @@
+import logging
+
 import discord
 from database import get_session, upsert_answer, get_next_question
 import utils
+
+log = logging.getLogger(__name__)
 
 
 class MCQView(discord.ui.View):
@@ -19,6 +23,8 @@ class MCQView(discord.ui.View):
         self.user_id      = user_id
         self.question_num = question_num
         self.total        = total
+        # Store the message so on_timeout can edit it to show disabled buttons
+        self.message: discord.Message | None = None
 
         placeholder = "Choose an option…"
         if question_num and total:
@@ -43,18 +49,29 @@ class MCQView(discord.ui.View):
         return True
 
     async def on_timeout(self):
+        """Disable all components when the view times out so the UI reflects reality."""
         for item in self.children:
             item.disabled = True
-        
-        try:
-            # We don't have the message object here easily, but we can stop the view.
-            # Usually views are used with a specific interaction.
-            # If we want to edit the message on timeout, we'd need to store it.
-            # For now, disabling children is a good baseline.
-            pass
-        except Exception:
-            pass
         self.stop()
+        # FIX: Actually edit the message to reflect the disabled state.
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except (discord.NotFound, discord.HTTPException):
+                pass  # Message was deleted or interaction expired — nothing we can do.
+
+    async def on_error(
+        self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item
+    ):
+        log.error("MCQView error on item %s: %s", item, error, exc_info=True)
+        msg = "❌ An error occurred while processing your answer. Please try again."
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+        except discord.HTTPException:
+            pass
 
 
 class MCQSelect(discord.ui.Select):
