@@ -40,9 +40,7 @@ async def mcq_stats(question_id: int, session: AsyncSession | None = None) -> di
 async def rating_stats(question_id: int, session: AsyncSession | None = None) -> dict:
     """
     Return rating aggregations: count, mean, min, max.
-
-    BUG FIX: Cast to Float instead of Integer for AVG so decimal means
-    (e.g. 3.5) are preserved correctly.
+    Cast to Float for AVG so decimal means (e.g. 3.5) are preserved correctly.
     """
     from models import Answer
 
@@ -109,26 +107,35 @@ async def response_count(survey_id: int, session: AsyncSession | None = None) ->
 
 
 def build_mcq_field(stats: dict[str, int]) -> str:
-    """Format MCQ stats as an ASCII bar-chart string for embed fields."""
+    """
+    Format MCQ stats as an ASCII bar-chart string for embed fields.
+    Shows percentage and total vote count alongside bars.
+    """
     if not stats:
         return "No answers yet."
-    max_count = max(stats.values(), default=1)
-    lines = [f"`{_ascii_bar(v, max_count)}` {k}" for k, v in stats.items()]
+
+    total_votes = sum(stats.values())
+    max_count   = max(stats.values(), default=1)
+    lines: list[str] = []
+
+    for choice, count in stats.items():
+        pct   = round(count / total_votes * 100) if total_votes else 0
+        bar   = _ascii_bar(count, max_count)
+        lines.append(f"`{bar}` **{pct}%** {choice}")
+
+    lines.append(f"\n📊 Total votes: **{total_votes}**")
     return "\n".join(lines)
 
 
 def build_rating_field(stats: dict) -> str:
     """
     Format rating stats as a visual string.
-
-    BUG FIX: Previously hardcoded '/ 5' which was wrong for 10-scale ratings.
-    Now dynamically uses the actual max from the data, and caps the star
-    display at 5 stars to keep the embed readable.
+    Dynamically uses the actual max from the data, caps star display at 5.
     """
     if stats["count"] == 0:
         return "No answers yet."
 
-    mean = stats["mean"]
+    mean      = stats["mean"]
     scale_max = stats["max"] if stats["max"] > 5 else 5  # infer scale
     # Show at most 5 stars visually regardless of scale to keep text compact
     star_count = min(5, round(mean * 5 / scale_max)) if scale_max > 0 else 0

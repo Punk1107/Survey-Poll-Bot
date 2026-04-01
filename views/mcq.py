@@ -23,7 +23,7 @@ class MCQView(discord.ui.View):
         self.user_id      = user_id
         self.question_num = question_num
         self.total        = total
-        # Store the message so on_timeout can edit it to show disabled buttons
+        # Assigned by utils._send() so on_timeout can edit the message
         self.message: discord.Message | None = None
 
         placeholder = "Choose an option…"
@@ -53,12 +53,11 @@ class MCQView(discord.ui.View):
         for item in self.children:
             item.disabled = True
         self.stop()
-        # FIX: Actually edit the message to reflect the disabled state.
         if self.message:
             try:
                 await self.message.edit(view=self)
             except (discord.NotFound, discord.HTTPException):
-                pass  # Message was deleted or interaction expired — nothing we can do.
+                pass  # Message was deleted or interaction expired
 
     async def on_error(
         self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item
@@ -83,11 +82,9 @@ class MCQSelect(discord.ui.Select):
         parent: MCQView,
         placeholder: str,
     ):
-        # FIX: Set an explicit custom_id so the select is stable across view
-        # re-instantiations. Without this, Discord generates a random ID per
-        # instance, breaking any persistent-view recovery.
-        # FIX: Discord hard-limits Select menus to 25 options — cap here.
-        # FIX: SelectOption labels must be unique; deduplicate preserving order.
+        # Stable custom_id so Discord can track this component across re-instantiations.
+        # Discord hard-limits Select menus to 25 options — cap here.
+        # SelectOption labels must be unique — deduplicate preserving insertion order.
         seen: set[str] = set()
         unique_options: list[str] = []
         for o in options[:25]:
@@ -127,12 +124,16 @@ class MCQSelect(discord.ui.Select):
                 user_id=str(interaction.user.id),
             )
 
+        # Advance question counter correctly:
+        # next_q number = current + 1, completion shows current (all done)
+        next_num = self.parent.question_num + 1 if next_q else self.parent.question_num
+
         await utils.send_question_ui(
             interaction=interaction,
             survey_id=self.survey_id,
             question=next_q,
             user_id=str(interaction.user.id),
-            current_num=self.parent.question_num + 1 if next_q else self.parent.question_num,
+            current_num=next_num,
             total=self.parent.total,
             is_edit=True,
         )

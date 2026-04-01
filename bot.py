@@ -107,16 +107,31 @@ async def on_app_command_error(
     interaction: discord.Interaction, error: app_commands.AppCommandError
 ):
     cmd_name = interaction.command.name if interaction.command else "unknown"
-    log.error("Command error in /%s: %s", cmd_name, error, exc_info=True)
-    
-    if isinstance(error, app_commands.CommandInvokeError):
-        # Handle specific DB or logic errors
-        original = error.original
-        msg = f"❌ **Error**: {original}"
+
+    # Unwrap the real exception for easier handling and logging
+    original = getattr(error, "original", error)
+
+    if isinstance(error, app_commands.CommandOnCooldown):
+        # Friendly cooldown message — not a server error, no need for ERROR log
+        msg = f"⏳ Slow down! Try again in **{error.retry_after:.1f}s**."
+        log.debug("Cooldown hit on /%s by %s", cmd_name, interaction.user)
+    elif isinstance(error, app_commands.MissingPermissions):
+        perms = ", ".join(f"`{p}`" for p in error.missing_permissions)
+        msg = f"🚫 You need the following permission(s): {perms}"
+        log.warning("MissingPermissions on /%s: %s", cmd_name, error)
+    elif isinstance(error, app_commands.BotMissingPermissions):
+        perms = ", ".join(f"`{p}`" for p in error.missing_permissions)
+        msg = f"🤖 I'm missing permission(s) to do that: {perms}"
+        log.warning("BotMissingPermissions on /%s: %s", cmd_name, error)
     elif isinstance(error, app_commands.CheckFailure):
         msg = f"🚫 {error}"
+        log.warning("CheckFailure on /%s: %s", cmd_name, error)
+    elif isinstance(error, app_commands.CommandInvokeError):
+        msg = f"❌ **Internal error**: {original}"
+        log.error("CommandInvokeError in /%s: %s", cmd_name, original, exc_info=original)
     else:
         msg = f"❌ **{type(error).__name__}**: {error}"
+        log.error("Unhandled AppCommandError in /%s: %s", cmd_name, error, exc_info=True)
 
     try:
         if interaction.response.is_done():
@@ -124,7 +139,7 @@ async def on_app_command_error(
         else:
             await interaction.response.send_message(msg, ephemeral=True)
     except discord.HTTPException:
-        pass # Silent fail if interaction expired
+        pass  # Silent fail if interaction expired
 
 
 # =====================
@@ -234,9 +249,10 @@ async def survey_create(
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
     await interaction.followup.send(
-        f"📢 **New Survey: {survey_title}**\n"
-        f"👤 Created by {interaction.user.mention}\n"
-        f"*(Use `/survey answer` once published)*"
+        f"📢 **New Survey created!**\n"
+        f"📋 **{survey_title}** (ID: `{survey_id}`)\n"
+        f"👤 By {interaction.user.mention}\n"
+        f"*(Use `/survey add-question {survey_id}` to build it, then `/survey publish` to go live)*"
     )
 
 
@@ -873,6 +889,8 @@ async def delete(
     interaction: discord.Interaction,
     survey_id: app_commands.Transform[int, SurveyTransformer],
 ):
+    # FIX: Merged into a single session — previously used two separate sessions
+    # for ownership check and count queries, doubling DB round-trips unnecessarily.
     async with get_session() as session:
         s = await session.get(Survey, survey_id)
         if not s:
@@ -884,10 +902,8 @@ async def delete(
             )
             return
         survey_title = s.title
-
-    async with get_session() as session:
-        r_count = await get_response_count(session, survey_id)
         q_count = await get_question_count(session, survey_id)
+        r_count = await get_response_count(session, survey_id)
 
     embed = discord.Embed(
         title="⚠️ Confirm Deletion",
@@ -904,7 +920,6 @@ async def delete(
     view = ConfirmDeleteView(survey_id, survey_title, str(interaction.user.id))
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
     # Assign the message so ConfirmDeleteView.on_timeout can edit it.
-    # fetch_message is not needed for ephemeral; use original_response.
     try:
         view.message = await interaction.original_response()
     except discord.HTTPException:
