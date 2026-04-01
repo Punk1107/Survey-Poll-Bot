@@ -20,12 +20,13 @@ from database import (
     get_response_count,
     run_migrations,
 )
-from models import Base, Survey, Question, Choice, Response, Answer
+from models import Base, Survey, Question, Choice
 from views.mcq import MCQView
 from views.rating import RatingView
 from views.text import TextModal, TextPromptView
 from analytics import mcq_stats, rating_stats, text_answers, build_mcq_field, build_rating_field
 from export import export_csv, export_json
+from database import get_next_question
 import utils
 from webserver import WebServer
 
@@ -105,7 +106,8 @@ async def on_ready():
 async def on_app_command_error(
     interaction: discord.Interaction, error: app_commands.AppCommandError
 ):
-    log.error("Command error in /%s: %s", interaction.command and interaction.command.name, error, exc_info=True)
+    cmd_name = interaction.command.name if interaction.command else "unknown"
+    log.error("Command error in /%s: %s", cmd_name, error, exc_info=True)
     
     if isinstance(error, app_commands.CommandInvokeError):
         # Handle specific DB or logic errors
@@ -472,7 +474,6 @@ async def answer(
             await interaction.followup.send("❌ This survey has no questions.", ephemeral=True)
             return
 
-        from database import get_next_question
         next_q = await get_next_question(session, s.id, str(interaction.user.id))
 
         # Get all questions for numbering — reuse the same session
@@ -865,6 +866,12 @@ async def delete(
     )
     view = ConfirmDeleteView(survey_id, survey_title, str(interaction.user.id))
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    # Assign the message so ConfirmDeleteView.on_timeout can edit it.
+    # fetch_message is not needed for ephemeral; use original_response.
+    try:
+        view.message = await interaction.original_response()
+    except discord.HTTPException:
+        pass
 
 
 # =====================

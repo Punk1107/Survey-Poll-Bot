@@ -1,7 +1,8 @@
 import asyncio
+import io
+import logging
 import os
 import tempfile
-import logging
 
 import pandas as pd
 from sqlalchemy import select
@@ -13,7 +14,16 @@ log = logging.getLogger(__name__)
 
 
 async def _get_survey_df(survey_id: int) -> pd.DataFrame:
-    """Load all survey answers with question text into a DataFrame."""
+    """
+    Load all survey answers with question text into a DataFrame.
+
+    FIX: Changed from INNER JOIN to LEFT OUTER JOIN between Question and Answer
+    so questions that nobody has answered yet still appear in the export with
+    empty answer cells — users won't silently miss unanswered questions in their
+    data. The old INNER JOIN silently dropped them.
+    Also added survey_id → question filter at the Question level, not Answer,
+    to avoid cross-survey data leaking via join expansion.
+    """
     async with get_session() as session:
         result = await session.execute(
             select(
@@ -22,8 +32,9 @@ async def _get_survey_df(survey_id: int) -> pd.DataFrame:
                 Question.qtype,
                 Answer.answer,
             )
-            .join(Answer,    Answer.question_id == Question.id)
-            .join(Response,  Response.id        == Answer.response_id)
+            .select_from(Question)
+            .outerjoin(Answer,    Answer.question_id == Question.id)
+            .outerjoin(Response,  Response.id        == Answer.response_id)
             .filter(Question.survey_id == survey_id)
             .order_by(Response.user_id, Question.order, Question.id)
         )
@@ -47,10 +58,14 @@ async def export_csv(survey_id: int) -> str:
     os.close(fd)
     try:
         await asyncio.to_thread(_write_csv, df, path)
-        log.info("Exported survey %d to CSV: %s", survey_id, path)
+        log.info("Exported survey %d to CSV: %s (%d rows)", survey_id, path, len(df))
         return path
     except Exception:
-        os.unlink(path)
+        # Clean up temp file before re-raising so we don't leak disk space
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
         raise
 
 
@@ -61,8 +76,11 @@ async def export_json(survey_id: int) -> str:
     os.close(fd)
     try:
         await asyncio.to_thread(_write_json, df, path)
-        log.info("Exported survey %d to JSON: %s", survey_id, path)
+        log.info("Exported survey %d to JSON: %s (%d rows)", survey_id, path, len(df))
         return path
     except Exception:
-        os.unlink(path)
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
         raise
