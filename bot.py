@@ -1053,7 +1053,10 @@ async def survey_help(interaction: discord.Interaction):
     )
 
     embed.set_footer(text="Tip: only the survey creator can close, delete, or view results.")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    # defer แบบ non-ephemeral ก่อน เพื่อป้องกัน Discord ตีความเป็น ephemeral
+    # แล้วส่ง followup แบบ public เพื่อให้ทุกคนในช่องเห็น
+    await interaction.response.defer()
+    await interaction.followup.send(embed=embed)
 
 
 # =====================
