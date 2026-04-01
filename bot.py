@@ -27,6 +27,7 @@ from views.text import TextModal, TextPromptView
 from analytics import mcq_stats, rating_stats, text_answers, build_mcq_field, build_rating_field
 from export import export_csv, export_json
 import utils
+from webserver import WebServer
 
 # =====================
 # LOGGING SETUP
@@ -55,6 +56,9 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 survey = app_commands.Group(name="survey", description="Survey & Poll system")
 bot.tree.add_command(survey)
 
+# ── Web-server (keep-alive for Render / UptimeRobot) ─────────────────────────
+_web = WebServer(bot)
+
 
 # =====================
 # SETUP HOOK  (runs once before gateway connects — correct lifecycle)
@@ -65,6 +69,17 @@ async def setup_hook():
         await conn.run_sync(Base.metadata.create_all)
     await run_migrations()
     log.info("Database tables created / verified.")
+    # Start the keep-alive web-server so Render keeps the dyno alive
+    # and UptimeRobot has an endpoint to ping.
+    await _web.start()
+
+
+# =====================
+# ON CLOSE  (graceful shutdown)
+# =====================
+@bot.event
+async def on_close():
+    await _web.stop()
 
 
 # =====================
