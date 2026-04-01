@@ -1,6 +1,9 @@
-from sqlalchemy import func, select, cast, Integer
+import logging
+from sqlalchemy import func, select, cast, Float
 from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_session
+
+log = logging.getLogger(__name__)
 
 
 def _ascii_bar(count: int, max_count: int, width: int = 10) -> str:
@@ -35,16 +38,21 @@ async def mcq_stats(question_id: int, session: AsyncSession | None = None) -> di
 
 
 async def rating_stats(question_id: int, session: AsyncSession | None = None) -> dict:
-    """Return rating aggregations: count, mean, min, max."""
+    """
+    Return rating aggregations: count, mean, min, max.
+
+    BUG FIX: Cast to Float instead of Integer for AVG so decimal means
+    (e.g. 3.5) are preserved correctly.
+    """
     from models import Answer
 
     async def _run(s: AsyncSession) -> dict:
         result = await s.execute(
             select(
                 func.count(Answer.id),
-                func.avg(cast(Answer.answer, Integer)),
-                func.min(cast(Answer.answer, Integer)),
-                func.max(cast(Answer.answer, Integer)),
+                func.avg(cast(Answer.answer, Float)),
+                func.min(cast(Answer.answer, Float)),
+                func.max(cast(Answer.answer, Float)),
             ).filter(Answer.question_id == question_id)
         )
         row = result.first()
@@ -53,8 +61,8 @@ async def rating_stats(question_id: int, session: AsyncSession | None = None) ->
         return {
             "count": row[0],
             "mean":  round(float(row[1]), 2) if row[1] is not None else 0.0,
-            "min":   row[2] or 0,
-            "max":   row[3] or 0,
+            "min":   int(row[2]) if row[2] is not None else 0,
+            "max":   int(row[3]) if row[3] is not None else 0,
         }
 
     if session is not None:
@@ -86,7 +94,6 @@ async def text_answers(question_id: int, session: AsyncSession | None = None) ->
 async def response_count(survey_id: int, session: AsyncSession | None = None) -> int:
     """Return the number of distinct respondents for a survey."""
     from models import Response
-    from sqlalchemy import func
 
     async def _run(s: AsyncSession) -> int:
         result = await s.execute(
@@ -105,18 +112,30 @@ def build_mcq_field(stats: dict[str, int]) -> str:
     """Format MCQ stats as an ASCII bar-chart string for embed fields."""
     if not stats:
         return "No answers yet."
-    max_count = max(stats.values()) if stats else 1
+    max_count = max(stats.values(), default=1)
     lines = [f"`{_ascii_bar(v, max_count)}` {k}" for k, v in stats.items()]
     return "\n".join(lines)
 
 
 def build_rating_field(stats: dict) -> str:
-    """Format rating stats as a visual string."""
+    """
+    Format rating stats as a visual string.
+
+    BUG FIX: Previously hardcoded '/ 5' which was wrong for 10-scale ratings.
+    Now dynamically uses the actual max from the data, and caps the star
+    display at 5 stars to keep the embed readable.
+    """
     if stats["count"] == 0:
         return "No answers yet."
-    stars = "⭐" * round(stats["mean"])
+
+    mean = stats["mean"]
+    scale_max = stats["max"] if stats["max"] > 5 else 5  # infer scale
+    # Show at most 5 stars visually regardless of scale to keep text compact
+    star_count = min(5, round(mean * 5 / scale_max)) if scale_max > 0 else 0
+    stars = "⭐" * star_count
+
     return (
-        f"{stars} **{stats['mean']}** / 5\n"
+        f"{stars} **{mean}** / {scale_max}\n"
         f"Responses: **{stats['count']}** | "
         f"Min: **{stats['min']}** | Max: **{stats['max']}**"
     )

@@ -31,6 +31,7 @@ import utils
 # =====================
 # LOGGING SETUP
 # =====================
+# config.py guarantees LOG_LEVEL is a valid level string (defaults to INFO).
 _log_level = getattr(logging, LOG_LEVEL, logging.INFO)
 
 logging.basicConfig(
@@ -69,9 +70,15 @@ async def setup_hook():
 # =====================
 # ON READY
 # =====================
+_synced = False  # Guard: only sync once across reconnects
+
 @bot.event
 async def on_ready():
-    await bot.tree.sync()
+    global _synced
+    if not _synced:
+        await bot.tree.sync()
+        _synced = True
+        log.info("🔄 Slash commands synced.")
     guild_count = len(bot.guilds)
     log.info("✅ Bot ready as %s | Serving %d guild(s)", bot.user, guild_count)
 
@@ -435,6 +442,8 @@ async def answer(
     # Defer immediately to avoid the 3-second Discord timeout during DB queries
     await interaction.response.defer(ephemeral=True)
 
+    # FIX: Merged the two separate get_session() calls into one to halve
+    # round-trips and ensure consistent data across all queries.
     async with get_session() as session:
         s = await session.get(Survey, survey_id)
         if not s or not s.is_published or s.is_closed:
@@ -443,13 +452,21 @@ async def answer(
             )
             return
 
-        q_count  = await get_question_count(session, s.id)
+        q_count = await get_question_count(session, s.id)
         if q_count == 0:
             await interaction.followup.send("❌ This survey has no questions.", ephemeral=True)
             return
 
         from database import get_next_question
         next_q = await get_next_question(session, s.id, str(interaction.user.id))
+
+        # Get all questions for numbering — reuse the same session
+        result = await session.execute(
+            select(Question)
+            .filter_by(survey_id=survey_id)
+            .order_by(Question.order, Question.id)
+        )
+        all_questions = result.scalars().all()
 
     if not next_q:
         embed = discord.Embed(
@@ -459,15 +476,6 @@ async def answer(
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
         return
-
-    # Figure out which question number we're on
-    async with get_session() as session:
-        result = await session.execute(
-            select(Question)
-            .filter_by(survey_id=survey_id)
-            .order_by(Question.order, Question.id)
-        )
-        all_questions = result.scalars().all()
 
     current_num = next((i + 1 for i, q in enumerate(all_questions) if q.id == next_q.id), 1)
 
@@ -704,10 +712,10 @@ async def results(
 @survey.command(name="export", description="Export survey results as CSV or JSON")
 @app_commands.describe(
     survey_id="Survey to export",
-    format="Export format",
+    fmt="Export format",
 )
 @app_commands.choices(
-    format=[
+    fmt=[
         app_commands.Choice(name="CSV  (Excel-friendly)", value="csv"),
         app_commands.Choice(name="JSON (API-friendly)",   value="json"),
     ]
@@ -715,7 +723,7 @@ async def results(
 async def export_cmd(
     interaction: discord.Interaction,
     survey_id: app_commands.Transform[int, SurveyTransformer],
-    format: app_commands.Choice[str],
+    fmt: app_commands.Choice[str],  # FIX: renamed from `format` — shadowed the builtin
 ):
     await interaction.response.defer(ephemeral=True)
 
@@ -733,14 +741,14 @@ async def export_cmd(
 
     path: str | None = None
     try:
-        if format.value == "csv":
+        if fmt.value == "csv":
             path = await export_csv(survey_id)
         else:
             path = await export_json(survey_id)
 
-        file = discord.File(path, filename=f"{survey_title[:40]}.{format.value}")
+        file = discord.File(path, filename=f"{survey_title[:40]}.{fmt.value}")
         await interaction.followup.send(
-            f"✅ Exported **{survey_title}** as {format.name}",
+            f"✅ Exported **{survey_title}** as {fmt.name}",
             file=file,
             ephemeral=True,
         )
@@ -761,6 +769,8 @@ class ConfirmDeleteView(discord.ui.View):
         self.survey_id    = survey_id
         self.survey_title = survey_title
         self.creator_id   = creator_id
+        # Store the message so on_timeout can edit it
+        self.message: discord.Message | None = None
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if str(interaction.user.id) != self.creator_id:
@@ -769,6 +779,22 @@ class ConfirmDeleteView(discord.ui.View):
             )
             return False
         return True
+
+    async def on_timeout(self):
+        """FIX: Previously had no on_timeout — the buttons stayed clickable after 30s."""
+        for item in self.children:
+            item.disabled = True
+        self.stop()
+        if self.message:
+            try:
+                timeout_embed = discord.Embed(
+                    title="⏰ Confirmation Expired",
+                    description="The deletion confirmation timed out. The survey was NOT deleted.",
+                    color=discord.Color.greyple(),
+                )
+                await self.message.edit(embed=timeout_embed, view=None)
+            except (discord.NotFound, discord.HTTPException):
+                pass
 
     @discord.ui.button(label="🗑️ Yes, Delete", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):

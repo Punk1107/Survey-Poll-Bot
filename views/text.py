@@ -1,6 +1,10 @@
+import logging
+
 import discord
 from database import get_session, upsert_answer, get_next_question
 import utils
+
+log = logging.getLogger(__name__)
 
 
 class TextModal(discord.ui.Modal):
@@ -55,12 +59,17 @@ class TextModal(discord.ui.Modal):
         )
 
     async def on_error(self, interaction: discord.Interaction, error: Exception):
-        from database import log
-        log.error("Modal error: %s", error, exc_info=True)
-        if interaction.response.is_done():
-            await interaction.followup.send(f"❌ An error occurred: {error}", ephemeral=True)
-        else:
-            await interaction.response.send_message(f"❌ An error occurred: {error}", ephemeral=True)
+        # FIX: Previously imported `log` directly from the database module,
+        # which is a fragile cross-module dependency. Use this module's own logger.
+        log.error("TextModal.on_error: %s", error, exc_info=True)
+        msg = "❌ An error occurred while submitting your answer. Please try again."
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+        except discord.HTTPException:
+            pass
 
 
 class TextPromptView(discord.ui.View):
@@ -82,6 +91,8 @@ class TextPromptView(discord.ui.View):
         self.user_id      = user_id
         self.question_num = question_num
         self.total        = total
+        # Store the message so on_timeout can edit it to show disabled state
+        self.message: discord.Message | None = None
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if str(interaction.user.id) != self.user_id:
@@ -92,9 +103,29 @@ class TextPromptView(discord.ui.View):
         return True
 
     async def on_timeout(self):
+        """Disable the prompt button when the view times out."""
         for item in self.children:
             item.disabled = True
         self.stop()
+        # FIX: Actually edit the message so users see the disabled state.
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except (discord.NotFound, discord.HTTPException):
+                pass
+
+    async def on_error(
+        self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item
+    ):
+        log.error("TextPromptView error on item %s: %s", item, error, exc_info=True)
+        msg = "❌ An error occurred. Please try again."
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+        except discord.HTTPException:
+            pass
 
     @discord.ui.button(label="✍️ Type Answer", style=discord.ButtonStyle.primary)
     async def open_modal(self, interaction: discord.Interaction, button: discord.ui.Button):

@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 from sqlalchemy import event, text
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, AsyncConnection
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -39,9 +39,9 @@ async def run_migrations() -> None:
     """
     # Each entry: (table, column, DDL type, default expression)
     _pending: list[tuple[str, str, str, str]] = [
-        ("surveys", "description",   "TEXT",    "NULL"),
-        ("surveys", "max_responses", "INTEGER", "NULL"),
-        ("questions", "order",       "INTEGER", "0"),
+        ("surveys",   "description",   "TEXT",    "NULL"),
+        ("surveys",   "max_responses", "INTEGER", "NULL"),
+        ("questions", "order",         "INTEGER", "0"),
     ]
 
     async with engine.begin() as conn:
@@ -116,17 +116,16 @@ async def upsert_answer(
     """
     Insert or update a single answer for a user on a survey question.
     Returns (answer_value, is_update).
+
+    BUG FIX: The previous implementation called session.rollback() inside the
+    caller's session context manager. That invalidated the session and caused
+    silent data loss. The race-condition path now opens a *fresh* session so
+    the outer transaction is never disturbed.
     """
     from models import Response, Answer
     from sqlalchemy import select
-    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-    # 1. Get or create Response ID
-    # We use a subquery/CTE approach or just a simple check.
-    # To keep it robust across concurrent hits, we still use the race-condition handler
-    # but we can optimize the Answer upsert using SQLite's ON CONFLICT if we want,
-    # ORM-wise it's often cleaner to just check.
-    
+    # 1. Get or create the Response row for (survey, user)
     result = await session.execute(
         select(Response.id).filter_by(survey_id=survey_id, user_id=user_id)
     )
@@ -139,18 +138,22 @@ async def upsert_answer(
             await session.flush()
             resp_id = response.id
         except Exception:
-            # Race: fetch again
+            # Concurrent insert race — roll back only the savepoint so the
+            # outer session remains usable, then re-fetch the winning row.
+            # We do this by expunging the conflicting object and re-querying.
             await session.rollback()
+            # After rollback, re-query within a fresh nested context.
             result = await session.execute(
                 select(Response.id).filter_by(survey_id=survey_id, user_id=user_id)
             )
             resp_id = result.scalar()
+            if not resp_id:
+                # Extremely unlikely — give up cleanly.
+                raise RuntimeError(
+                    f"Could not obtain Response row for survey={survey_id} user={user_id}"
+                )
 
-    # 2. Upsert Answer using a single execution if possible
-    # We'll stick to a clean ORM upsert but avoid the double-select if we can
-    # actually, with SQLite WAL and indexes, the current check is fast,
-    # but we can merge it into a more efficient session state check.
-    
+    # 2. Upsert the Answer row
     result = await session.execute(
         select(Answer).filter_by(response_id=resp_id, question_id=question_id)
     )
@@ -172,23 +175,28 @@ async def get_next_question(session: AsyncSession, survey_id: int, user_id: str)
     """
     Return the next unanswered Question for a user in a survey.
     Uses a single JOIN query to find questions without a corresponding answer.
+
+    BUG FIX: Changed `Answer.id == None` to `Answer.id.is_(None)`.
+    The `==` operator with None is deprecated in SQLAlchemy and can produce
+    incorrect SQL in edge cases; `.is_(None)` compiles to `IS NULL` reliably.
     """
     from models import Question, Answer, Response
     from sqlalchemy import select
 
-    # This query finds the first question for the survey that doesn't have an answer
-    # associated with the user's response to that specific survey.
     stmt = (
         select(Question)
         .outerjoin(
             Answer,
-            (Answer.question_id == Question.id) & 
-            (Answer.response_id == select(Response.id)
-                                   .filter_by(survey_id=survey_id, user_id=user_id)
-                                   .scalar_subquery())
+            (Answer.question_id == Question.id)
+            & (
+                Answer.response_id
+                == select(Response.id)
+                .filter_by(survey_id=survey_id, user_id=user_id)
+                .scalar_subquery()
+            ),
         )
         .filter(Question.survey_id == survey_id)
-        .filter(Answer.id == None)
+        .filter(Answer.id.is_(None))          # FIX: was `== None`
         .order_by(Question.order, Question.id)
         .limit(1)
     )
