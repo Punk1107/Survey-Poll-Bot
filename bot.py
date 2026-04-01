@@ -911,6 +911,136 @@ async def delete(
         pass
 
 
+# ── /survey help ──────────────────────────────────────────────────────────
+@survey.command(name="help", description="Show all available survey commands and how to use them")
+async def survey_help(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="📖 Survey Bot — Command Reference",
+        description=(
+            "Welcome to **Survey Poll Bot**! 🎉\n"
+            "All commands are under the `/survey` group.\n"
+            "Use the autocomplete dropdown when a command asks for a **Survey ID**."
+        ),
+        color=discord.Color.blurple(),
+    )
+
+    # ── Setup commands ──────────────────────────────────────────────────
+    embed.add_field(
+        name="━━━ 🛠️  Setup ━━━",
+        value="\u200b",
+        inline=False,
+    )
+    embed.add_field(
+        name="`/survey create`",
+        value=(
+            "Create a new survey.\n"
+            "**Options:** `title` · `anonymous` · `description` *(optional)*"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="`/survey add-question`",
+        value=(
+            "Add a question to your survey.\n"
+            "**Types:** 🔘 Single choice (MCQ) · ⭐ Rating (1–5) · 📝 Free text"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="`/survey add-choice`",
+        value="Add an answer option to an MCQ question.",
+        inline=False,
+    )
+
+    # ── Publishing commands ─────────────────────────────────────────────
+    embed.add_field(
+        name="━━━ 🚀  Publishing ━━━",
+        value="\u200b",
+        inline=False,
+    )
+    embed.add_field(
+        name="`/survey preview`",
+        value="Preview your survey before making it public (only visible to you).",
+        inline=False,
+    )
+    embed.add_field(
+        name="`/survey publish`",
+        value="Open your survey so members can start answering it.",
+        inline=False,
+    )
+    embed.add_field(
+        name="`/survey close`",
+        value="Close your survey and stop accepting new responses.",
+        inline=False,
+    )
+    embed.add_field(
+        name="`/survey reopen`",
+        value="Reopen a previously closed survey.",
+        inline=False,
+    )
+
+    # ── Participation ───────────────────────────────────────────────────
+    embed.add_field(
+        name="━━━ 📝  Participation ━━━",
+        value="\u200b",
+        inline=False,
+    )
+    embed.add_field(
+        name="`/survey answer`",
+        value="Answer a published survey. The bot will guide you through each question.",
+        inline=False,
+    )
+
+    # ── Management & Results ────────────────────────────────────────────
+    embed.add_field(
+        name="━━━ 📊  Management & Results ━━━",
+        value="\u200b",
+        inline=False,
+    )
+    embed.add_field(
+        name="`/survey list`",
+        value="List all surveys you have created.",
+        inline=False,
+    )
+    embed.add_field(
+        name="`/survey info`",
+        value="Show full details (status, question count, response count) for a survey.",
+        inline=False,
+    )
+    embed.add_field(
+        name="`/survey results`",
+        value="View aggregated results and answer summaries for your survey.",
+        inline=False,
+    )
+    embed.add_field(
+        name="`/survey export`",
+        value="Download results as a **CSV** (Excel) or **JSON** file.",
+        inline=False,
+    )
+    embed.add_field(
+        name="`/survey delete`",
+        value="⚠️ Permanently delete a survey and all its data. Requires confirmation.",
+        inline=False,
+    )
+
+    # ── Quick-start workflow ────────────────────────────────────────────
+    embed.add_field(
+        name="━━━ ⚡ Quick-Start Workflow ━━━",
+        value=(
+            "1️⃣ `/survey create` → give it a title\n"
+            "2️⃣ `/survey add-question` → add questions (repeat as needed)\n"
+            "3️⃣ `/survey add-choice` → add options for MCQ questions\n"
+            "4️⃣ `/survey preview` → check everything looks right\n"
+            "5️⃣ `/survey publish` → let people answer!\n"
+            "6️⃣ `/survey results` or `/survey export` → see the data"
+        ),
+        inline=False,
+    )
+
+    embed.set_footer(text="Tip: only the survey creator can close, delete, or view results.")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 # =====================
 # RUN
 # =====================
