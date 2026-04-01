@@ -405,3 +405,7 @@ WHERE lower(surveys.title) LIKE lower(?) ORDER BY surveys.created_at DESC
  LIMIT ? OFFSET ?]
 [parameters: ('%%', 25, 0)]
 (Background on this error at: https://sqlalche.me/e/14/e3q8)
+2026-04-01 17:18:53 | WARNING  | discord.ext.commands.bot | Privileged message content intent is missing, commands may not work as expected.
+2026-04-01 17:18:53 | INFO     | discord.client | logging in using static token
+2026-04-01 17:18:54 | INFO     | database | Migration: added column 'surveys.description'
+2026-04-01 17:18:54 | INFO     | database | Migration: added column 'surveys.max_responses'

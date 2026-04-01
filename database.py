@@ -48,7 +48,7 @@ async def run_migrations() -> None:
                 await conn.execute(
                     text(
                         f"ALTER TABLE {table} "
-                        f"ADD COLUMN {column} {col_type} DEFAULT {default}"
+                        f'ADD COLUMN "{column}" {col_type} DEFAULT {default}'
                     )
                 )
                 log.info("Migration: added column '%s.%s'", table, column)
