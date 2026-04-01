@@ -816,24 +816,53 @@ class ConfirmDeleteView(discord.ui.View):
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         async with get_session() as session:
             s = await session.get(Survey, self.survey_id)
-            if s:
-                await session.delete(s)
+            if not s:
+                await interaction.response.edit_message(
+                    embed=discord.Embed(
+                        title="❌ Already Deleted",
+                        description="This survey no longer exists.",
+                        color=discord.Color.red(),
+                    ),
+                    view=None,
+                    content=None,
+                )
+                self.stop()
+                return
+            await session.delete(s)
 
-        embed = discord.Embed(
+        log.info(
+            "Survey #%d '%s' permanently deleted by user %s.",
+            self.survey_id,
+            self.survey_title,
+            interaction.user,
+        )
+
+        success_embed = discord.Embed(
             title="🗑️ Survey Deleted",
             description=f"**{self.survey_title}** has been permanently deleted.",
             color=discord.Color.red(),
         )
-        await interaction.response.edit_message(embed=embed, view=None, content=None)
+        success_embed.add_field(name="Survey ID", value=f"`{self.survey_id}`", inline=True)
+        success_embed.add_field(name="Deleted by", value=interaction.user.mention, inline=True)
+        success_embed.set_footer(text="All questions, choices, and responses have been removed.")
+
+        await interaction.response.edit_message(embed=success_embed, view=None, content=None)
+
+        # Public channel announcement — consistent with close / reopen / publish
+        await interaction.followup.send(
+            f"🗑️ **Survey deleted: {self.survey_title}**\n"
+            f"👤 Deleted by {interaction.user.mention}"
+        )
         self.stop()
 
     @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = discord.Embed(
             title="↩️ Cancelled",
-            description="The survey was not deleted.",
+            description=f"**{self.survey_title}** was not deleted.",
             color=discord.Color.greyple(),
         )
+        embed.set_footer(text="The survey and all its data remain intact.")
         await interaction.response.edit_message(embed=embed, view=None, content=None)
         self.stop()
 
@@ -856,14 +885,22 @@ async def delete(
             return
         survey_title = s.title
 
+    async with get_session() as session:
+        r_count = await get_response_count(session, survey_id)
+        q_count = await get_question_count(session, survey_id)
+
     embed = discord.Embed(
         title="⚠️ Confirm Deletion",
         description=(
-            f"Are you sure you want to permanently delete **{survey_title}**?\n"
-            "This will remove **all questions, choices, and responses**. This cannot be undone."
+            f"Are you sure you want to permanently delete **{survey_title}**?\n\n"
+            "This will remove **all questions, choices, and responses**. "
+            "**This cannot be undone.**"
         ),
         color=discord.Color.orange(),
     )
+    embed.add_field(name="Questions", value=str(q_count), inline=True)
+    embed.add_field(name="Responses", value=str(r_count), inline=True)
+    embed.set_footer(text="You have 30 seconds to confirm.")
     view = ConfirmDeleteView(survey_id, survey_title, str(interaction.user.id))
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
     # Assign the message so ConfirmDeleteView.on_timeout can edit it.
