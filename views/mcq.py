@@ -83,13 +83,27 @@ class MCQSelect(discord.ui.Select):
         parent: MCQView,
         placeholder: str,
     ):
+        # FIX: Set an explicit custom_id so the select is stable across view
+        # re-instantiations. Without this, Discord generates a random ID per
+        # instance, breaking any persistent-view recovery.
+        # FIX: Discord hard-limits Select menus to 25 options — cap here.
+        # FIX: SelectOption labels must be unique; deduplicate preserving order.
+        seen: set[str] = set()
+        unique_options: list[str] = []
+        for o in options[:25]:
+            label = o[:100]
+            if label not in seen:
+                seen.add(label)
+                unique_options.append(label)
+
         super().__init__(
+            custom_id=f"mcq_{survey_id}_{question_id}",
             placeholder=placeholder,
             min_values=1,
             max_values=1,
             options=[
-                discord.SelectOption(label=o[:100], value=o[:100])
-                for o in options
+                discord.SelectOption(label=label, value=label)
+                for label in unique_options
             ],
         )
         self.survey_id   = survey_id

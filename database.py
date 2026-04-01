@@ -5,7 +5,6 @@ from typing import AsyncGenerator
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from config import DATABASE_URL
 
@@ -22,8 +21,6 @@ _engine_kwargs: dict = {
 }
 
 if _is_sqlite:
-    # StaticPool keeps a single connection for SQLite — needed for WAL + in-memory DBs.
-    # For file-based SQLite the pool defaults are fine, but we tune them explicitly.
     _engine_kwargs["connect_args"] = {"check_same_thread": False}
     _engine_kwargs["pool_pre_ping"] = True
 
@@ -34,10 +31,9 @@ engine = create_async_engine(async_db_url, **_engine_kwargs)
 async def run_migrations() -> None:
     """
     Add any columns that exist in the ORM models but are missing from the
-    live database (SQLite's CREATE TABLE … IF NOT EXISTS won't add new columns
-    to an existing table, so we handle that here explicitly).
+    live database (SQLite ALTER TABLE IF NOT EXISTS is not supported, so we
+    check PRAGMA table_info and add manually).
     """
-    # Each entry: (table, column, DDL type, default expression)
     _pending: list[tuple[str, str, str, str]] = [
         ("surveys",   "description",   "TEXT",    "NULL"),
         ("surveys",   "max_responses", "INTEGER", "NULL"),
@@ -46,9 +42,8 @@ async def run_migrations() -> None:
 
     async with engine.begin() as conn:
         for table, column, col_type, default in _pending:
-            # PRAGMA table_info returns one row per column
             rows = await conn.execute(text(f"PRAGMA table_info({table})"))
-            existing = {row[1] for row in rows}   # index 1 = column name
+            existing = {row[1] for row in rows}
             if column not in existing:
                 await conn.execute(
                     text(
@@ -64,7 +59,7 @@ async def run_migrations() -> None:
 def _set_sqlite_pragmas(dbapi_conn, _connection_record):
     """
     Applied once per physical SQLite connection.
-    WAL mode → massively improves concurrent read/write throughput.
+    WAL mode → better concurrent read/write throughput.
     foreign_keys=ON → enforce referential integrity at the DB level.
     """
     cursor = dbapi_conn.cursor()
@@ -72,6 +67,7 @@ def _set_sqlite_pragmas(dbapi_conn, _connection_record):
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.execute("PRAGMA synchronous=NORMAL")   # safe + faster than FULL
     cursor.execute("PRAGMA cache_size=-32000")    # 32 MB page cache
+    cursor.execute("PRAGMA temp_store=MEMORY")    # keep temp tables in RAM
     cursor.close()
 
 
@@ -80,7 +76,7 @@ _AsyncSessionFactory = sessionmaker(
     bind=engine,
     class_=AsyncSession,
     expire_on_commit=False,
-    autoflush=False,   # explicit flush gives us control; avoids accidental DB hits
+    autoflush=False,
 )
 
 
@@ -88,11 +84,7 @@ _AsyncSessionFactory = sessionmaker(
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
     """
     Async context manager that provides a scoped AsyncSession.
-    Rolls back on exception; always closes the session.
-
-    Usage:
-        async with get_session() as session:
-            ...
+    Commits on success, rolls back on any exception, always closes.
     """
     session: AsyncSession = _AsyncSessionFactory()
     try:
@@ -117,10 +109,13 @@ async def upsert_answer(
     Insert or update a single answer for a user on a survey question.
     Returns (answer_value, is_update).
 
-    BUG FIX: The previous implementation called session.rollback() inside the
-    caller's session context manager. That invalidated the session and caused
-    silent data loss. The race-condition path now opens a *fresh* session so
-    the outer transaction is never disturbed.
+    Race-condition handling: if two requests try to create the Response row
+    simultaneously (unique constraint violation on flush), we catch the
+    exception, roll back, then re-fetch the winning row.
+
+    IMPORTANT: After a rollback, the SQLAlchemy async session begins a NEW
+    implicit transaction automatically when the next statement runs, so it
+    is perfectly safe to continue using the session post-rollback.
     """
     from models import Response, Answer
     from sqlalchemy import select
@@ -138,17 +133,15 @@ async def upsert_answer(
             await session.flush()
             resp_id = response.id
         except Exception:
-            # Concurrent insert race — roll back only the savepoint so the
-            # outer session remains usable, then re-fetch the winning row.
-            # We do this by expunging the conflicting object and re-querying.
+            # UniqueConstraint race: roll back, then re-fetch winning row.
+            # The session is still usable after rollback — SQLAlchemy async
+            # begins a new implicit transaction on the next statement.
             await session.rollback()
-            # After rollback, re-query within a fresh nested context.
             result = await session.execute(
                 select(Response.id).filter_by(survey_id=survey_id, user_id=user_id)
             )
             resp_id = result.scalar()
             if not resp_id:
-                # Extremely unlikely — give up cleanly.
                 raise RuntimeError(
                     f"Could not obtain Response row for survey={survey_id} user={user_id}"
                 )
@@ -174,11 +167,7 @@ async def upsert_answer(
 async def get_next_question(session: AsyncSession, survey_id: int, user_id: str):
     """
     Return the next unanswered Question for a user in a survey.
-    Uses a single JOIN query to find questions without a corresponding answer.
-
-    BUG FIX: Changed `Answer.id == None` to `Answer.id.is_(None)`.
-    The `==` operator with None is deprecated in SQLAlchemy and can produce
-    incorrect SQL in edge cases; `.is_(None)` compiles to `IS NULL` reliably.
+    Uses a LEFT OUTER JOIN + IS NULL to find gaps in one round-trip.
     """
     from models import Question, Answer, Response
     from sqlalchemy import select
@@ -196,7 +185,7 @@ async def get_next_question(session: AsyncSession, survey_id: int, user_id: str)
             ),
         )
         .filter(Question.survey_id == survey_id)
-        .filter(Answer.id.is_(None))          # FIX: was `== None`
+        .filter(Answer.id.is_(None))
         .order_by(Question.order, Question.id)
         .limit(1)
     )
@@ -217,7 +206,7 @@ async def get_question_count(session: AsyncSession, survey_id: int) -> int:
 
 
 async def get_response_count(session: AsyncSession, survey_id: int) -> int:
-    """Return the number of distinct users who have responded."""
+    """Return the number of unique respondents for a survey."""
     from models import Response
     from sqlalchemy import select, func
 

@@ -20,19 +20,18 @@ Usage (from bot.py setup_hook)
 ────────────────────────────────
     from webserver import WebServer
     web = WebServer(bot)
-    await web.start()          # non-blocking — schedules the server as a task
-    # await web.stop()         # call on bot close if you need clean shutdown
+    await web.start()   # idempotent — safe to call multiple times
 
 Environment variables
 ──────────────────────
-  PORT       Port to listen on (Render sets this automatically, default 8080)
-  HOST       Bind address (default 0.0.0.0)
+  PORT   Port to listen on (Render injects this automatically, default 8080)
+  HOST   Bind address (default 0.0.0.0)
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
+import math
 import os
 import platform
 import sys
@@ -42,7 +41,6 @@ from typing import TYPE_CHECKING
 from aiohttp import web
 
 if TYPE_CHECKING:
-    import discord
     from discord.ext import commands
 
 log = logging.getLogger("survey_bot.webserver")
@@ -116,7 +114,6 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       font-weight: 600;
     }}
     .badge-online  {{ background: rgba(87,242,135,0.15); color: var(--accent2); }}
-    .badge-idle    {{ background: rgba(254,231,92,0.15);  color: var(--accent3); }}
     .badge-offline {{ background: rgba(237,66,69,0.15);   color: #ed4245; }}
     .grid {{
       display: grid;
@@ -132,9 +129,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     }}
     .stat-label {{ color: var(--muted); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; }}
     .stat-value {{ font-size: 1.35rem; font-weight: 700; margin-top: 4px; }}
-    .endpoints {{
-      margin-top: 20px;
-    }}
+    .endpoints {{ margin-top: 20px; }}
     .endpoint {{
       display: flex;
       align-items: center;
@@ -237,39 +232,48 @@ def _uptime() -> str:
     return f"{seconds}s"
 
 
-# ── Request handlers ──────────────────────────────────────────────────────────
+def _safe_latency_ms(raw_latency: float) -> str:
+    """
+    Convert bot.latency (seconds) to a display string.
+    FIX: bot.latency is `inf` before the first heartbeat — guard that case.
+    """
+    if math.isfinite(raw_latency):
+        return f"{round(raw_latency * 1000)} ms"
+    return "—"
+
+
+# ── Web server class ──────────────────────────────────────────────────────────
 
 class WebServer:
     """
     Lifecycle-managed aiohttp web server.
-
     Inject the bot instance so routes can reflect live stats.
     """
 
     def __init__(self, bot: "commands.Bot | None" = None) -> None:
-        self._bot   = bot
-        self._app   = web.Application()
-        self._runner: web.AppRunner | None   = None
-        self._site:   web.TCPSite | None = None
-        self._task:   asyncio.Task | None = None
+        self._bot     = bot
+        self._app     = web.Application()
+        self._runner: web.AppRunner | None = None
+        self._site:   web.TCPSite | None   = None
+        # FIX: idempotency flag — prevents double-bind if setup_hook fires again
+        self._started: bool = False
 
         # Register routes
         self._app.router.add_get("/",       self._handle_root)
         self._app.router.add_get("/health", self._handle_health)
         self._app.router.add_get("/ping",   self._handle_ping)
-        # Catch-all for unknown paths → 404 JSON
+        # Catch-all → 404 JSON
         self._app.router.add_route("*", "/{path_info:.*}", self._handle_404)
 
     # ── Route handlers ────────────────────────────────────────────────────────
 
     async def _handle_root(self, request: web.Request) -> web.Response:
         """Human-readable HTML status dashboard."""
-        bot = self._bot
-        is_ready = bot is not None and not bot.is_closed()
+        bot      = self._bot
+        is_ready = bot is not None and not bot.is_closed() and bot.is_ready()
 
         if is_ready:
-            latency_ms = round(bot.latency * 1000)
-            latency    = f"{latency_ms} ms"
+            latency    = _safe_latency_ms(bot.latency)
             guilds     = str(len(bot.guilds))
             bot_name   = str(bot.user) if bot.user else "Survey Poll Bot"
             status_cls = "badge-online"
@@ -297,21 +301,25 @@ class WebServer:
         """
         JSON health-check endpoint.
 
-        Returns HTTP 200 when bot is connected, 503 when disconnected.
-        UptimeRobot / BetterStack treat non-2xx as down.
+        HTTP 200 when bot is connected and ready, 503 otherwise.
+        UptimeRobot / BetterStack treat non-2xx as a downtime event.
         """
         bot      = self._bot
-        is_ready = bot is not None and not bot.is_closed()
+        # FIX: also check bot.is_ready() — is_closed() alone isn't enough;
+        # the bot can be not-closed but still initialising (latency = inf).
+        is_ready = bot is not None and not bot.is_closed() and bot.is_ready()
 
         payload: dict = {
-            "status":     "ok"      if is_ready else "starting",
-            "uptime":     _uptime(),
-            "timestamp":  datetime.now(timezone.utc).isoformat(),
-            "python":     platform.python_version(),
+            "status":    "ok"       if is_ready else "starting",
+            "uptime":    _uptime(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "python":    platform.python_version(),
         }
 
         if is_ready:
-            payload["latency_ms"] = round(bot.latency * 1000)
+            # FIX: guard inf latency before exposing it in JSON
+            latency_raw = bot.latency
+            payload["latency_ms"] = round(latency_raw * 1000) if math.isfinite(latency_raw) else None
             payload["guilds"]     = len(bot.guilds)
 
         status_code = 200 if is_ready else 503
@@ -319,8 +327,8 @@ class WebServer:
 
     async def _handle_ping(self, request: web.Request) -> web.Response:
         """
-        Simplest possible probe — returns 'pong'.
-        Use this URL in UptimeRobot (keyword: 'pong').
+        Simplest possible probe — always returns HTTP 200 with 'pong'.
+        Configure UptimeRobot with keyword 'pong' against this URL.
         """
         return web.Response(text="pong")
 
@@ -334,23 +342,29 @@ class WebServer:
 
     async def start(self) -> None:
         """
-        Start the web-server as a background asyncio task.
-        Non-blocking — returns immediately after scheduling.
+        Start the web-server.
+        FIX: Idempotent — safe to call multiple times (e.g. on bot reconnect).
         """
+        if self._started:
+            log.debug("WebServer.start() called but server is already running — skipped.")
+            return
+
         host = os.getenv("HOST", "0.0.0.0")
         port = int(os.getenv("PORT", "8080"))
 
         self._runner = web.AppRunner(
             self._app,
-            access_log=None,        # suppress aiohttp access logs (bot has its own)
+            access_log=None,   # suppress aiohttp per-request logs; bot has its own
         )
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, host=host, port=port)
         await self._site.start()
+        self._started = True
         log.info("🌐 Web-server listening on http://%s:%d", host, port)
 
     async def stop(self) -> None:
         """Gracefully shut down the web-server."""
-        if self._runner:
+        if self._runner and self._started:
             await self._runner.cleanup()
+            self._started = False
             log.info("🌐 Web-server stopped.")
