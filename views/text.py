@@ -48,19 +48,19 @@ class TextModal(discord.ui.Modal):
                 user_id=str(interaction.user.id),
             )
 
+        next_num = self.question_num + 1 if next_q else self.question_num
+
         await utils.send_question_ui(
             interaction=interaction,
             survey_id=self.survey_id,
             question=next_q,
             user_id=str(interaction.user.id),
-            current_num=self.question_num + 1 if next_q else self.question_num,
+            current_num=next_num,
             total=self.total,
             is_edit=True,
         )
 
     async def on_error(self, interaction: discord.Interaction, error: Exception):
-        # FIX: Previously imported `log` directly from the database module,
-        # which is a fragile cross-module dependency. Use this module's own logger.
         log.error("TextModal.on_error: %s", error, exc_info=True)
         msg = "❌ An error occurred while submitting your answer. Please try again."
         try:
@@ -91,7 +91,7 @@ class TextPromptView(discord.ui.View):
         self.user_id      = user_id
         self.question_num = question_num
         self.total        = total
-        # Store the message so on_timeout can edit it to show disabled state
+        # Assigned by utils._send() so on_timeout can edit the message
         self.message: discord.Message | None = None
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -107,7 +107,6 @@ class TextPromptView(discord.ui.View):
         for item in self.children:
             item.disabled = True
         self.stop()
-        # FIX: Actually edit the message so users see the disabled state.
         if self.message:
             try:
                 await self.message.edit(view=self)

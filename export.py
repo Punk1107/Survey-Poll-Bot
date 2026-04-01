@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import io
 import logging
 import os
@@ -8,23 +9,26 @@ import pandas as pd
 from sqlalchemy import select
 
 from database import get_session
-from models import Answer, Question, Response
+from models import Answer, Question, Response, Survey
 
 log = logging.getLogger(__name__)
 
 
-async def _get_survey_df(survey_id: int) -> pd.DataFrame:
+async def _get_survey_df(survey_id: int) -> tuple[pd.DataFrame, bool]:
     """
     Load all survey answers with question text into a DataFrame.
+    Returns (df, is_anonymous).
 
-    FIX: Changed from INNER JOIN to LEFT OUTER JOIN between Question and Answer
-    so questions that nobody has answered yet still appear in the export with
-    empty answer cells — users won't silently miss unanswered questions in their
-    data. The old INNER JOIN silently dropped them.
-    Also added survey_id → question filter at the Question level, not Answer,
-    to avoid cross-survey data leaking via join expansion.
+    Uses LEFT OUTER JOIN so questions that nobody has answered yet still appear
+    in the export with empty answer cells — the old INNER JOIN silently dropped them.
+
+    FIX: Also returns is_anonymous so the caller can decide whether to mask user IDs.
     """
     async with get_session() as session:
+        # Fetch the is_anonymous flag in the same session
+        survey = await session.get(Survey, survey_id)
+        is_anonymous = bool(survey and survey.is_anonymous)
+
         result = await session.execute(
             select(
                 Response.user_id,
@@ -40,7 +44,17 @@ async def _get_survey_df(survey_id: int) -> pd.DataFrame:
         )
         rows = result.all()
 
-    return pd.DataFrame(rows, columns=["user_id", "question", "qtype", "answer"])
+    df = pd.DataFrame(rows, columns=["user_id", "question", "qtype", "answer"])
+
+    # FIX: Privacy — mask user IDs for anonymous surveys using a SHA-256 prefix
+    # so the export still lets you count unique respondents without exposing Discord IDs.
+    if is_anonymous and not df.empty:
+        df["user_id"] = df["user_id"].apply(
+            lambda uid: "anon_" + hashlib.sha256(str(uid).encode()).hexdigest()[:12]
+            if pd.notna(uid) else uid
+        )
+
+    return df, is_anonymous
 
 
 def _write_csv(df: pd.DataFrame, path: str) -> None:
@@ -53,15 +67,17 @@ def _write_json(df: pd.DataFrame, path: str) -> None:
 
 async def export_csv(survey_id: int) -> str:
     """Export survey results to a temporary CSV file. Returns the file path."""
-    df = await _get_survey_df(survey_id)
+    df, is_anonymous = await _get_survey_df(survey_id)
     fd, path = tempfile.mkstemp(suffix=".csv", prefix=f"survey_{survey_id}_")
     os.close(fd)
     try:
         await asyncio.to_thread(_write_csv, df, path)
-        log.info("Exported survey %d to CSV: %s (%d rows)", survey_id, path, len(df))
+        log.info(
+            "Exported survey %d to CSV: %s (%d rows, anonymous=%s)",
+            survey_id, path, len(df), is_anonymous,
+        )
         return path
     except Exception:
-        # Clean up temp file before re-raising so we don't leak disk space
         try:
             os.unlink(path)
         except OSError:
@@ -71,12 +87,15 @@ async def export_csv(survey_id: int) -> str:
 
 async def export_json(survey_id: int) -> str:
     """Export survey results to a temporary JSON file. Returns the file path."""
-    df = await _get_survey_df(survey_id)
+    df, is_anonymous = await _get_survey_df(survey_id)
     fd, path = tempfile.mkstemp(suffix=".json", prefix=f"survey_{survey_id}_")
     os.close(fd)
     try:
         await asyncio.to_thread(_write_json, df, path)
-        log.info("Exported survey %d to JSON: %s (%d rows)", survey_id, path, len(df))
+        log.info(
+            "Exported survey %d to JSON: %s (%d rows, anonymous=%s)",
+            survey_id, path, len(df), is_anonymous,
+        )
         return path
     except Exception:
         try:

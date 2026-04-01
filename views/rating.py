@@ -20,8 +20,9 @@ _RATING_EMOJI = {
     10: "🔟",
 }
 
-# Button colors: 1-3 green, 4-7 blurple, 8-10 red (difficulty gradient)
+
 def _button_style(value: int) -> discord.ButtonStyle:
+    """Button colors: 1-3 green, 4-7 blurple, 8-10 red (difficulty gradient)."""
     if value <= 3:
         return discord.ButtonStyle.success
     if value <= 7:
@@ -45,7 +46,7 @@ class RatingView(discord.ui.View):
         self.user_id      = user_id
         self.question_num = question_num
         self.total        = total
-        # Store the message so on_timeout can edit it to show disabled buttons
+        # Assigned by utils._send() so on_timeout can edit the message
         self.message: discord.Message | None = None
 
         for i in range(1, scale + 1):
@@ -71,7 +72,6 @@ class RatingView(discord.ui.View):
         for item in self.children:
             item.disabled = True
         self.stop()
-        # FIX: Actually edit the message so users see the disabled state.
         if self.message:
             try:
                 await self.message.edit(view=self)
@@ -94,7 +94,14 @@ class RatingView(discord.ui.View):
 
 class RatingButton(discord.ui.Button):
     def __init__(self, value: int, label: str, style: discord.ButtonStyle, parent: RatingView):
-        super().__init__(label=label, style=style)
+        # FIX: Use a stable custom_id so Discord can track this button across
+        # view re-instantiations. Without this, Discord assigns a random ID per
+        # instance, which can cause "unknown interaction" errors on reconnects.
+        super().__init__(
+            label=label,
+            style=style,
+            custom_id=f"rating_{parent.survey_id}_{parent.question_id}_{value}",
+        )
         self.value  = value
         self.parent = parent
 
@@ -113,12 +120,14 @@ class RatingButton(discord.ui.Button):
                 user_id=str(interaction.user.id),
             )
 
+        next_num = self.parent.question_num + 1 if next_q else self.parent.question_num
+
         await utils.send_question_ui(
             interaction=interaction,
             survey_id=self.parent.survey_id,
             question=next_q,
             user_id=str(interaction.user.id),
-            current_num=self.parent.question_num + 1 if next_q else self.parent.question_num,
+            current_num=next_num,
             total=self.parent.total,
             is_edit=True,
         )

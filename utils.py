@@ -92,7 +92,7 @@ async def send_question_ui(
             )
             choices = list(result.scalars().all())
 
-        # BUG FIX: Discord forbids a Select with zero options. Guard here
+        # Discord forbids a Select with zero options — guard here
         # so a misconfigured MCQ question gets a clear error instead of a crash.
         if not choices:
             error_embed = discord.Embed(
@@ -168,14 +168,32 @@ async def _send(
     view: discord.ui.View | None,
     is_edit: bool,
 ):
-    """Central dispatcher — handles edit vs. new message vs. followup."""
+    """
+    Central dispatcher — handles edit vs. new message vs. followup.
+    Also assigns `view.message` so on_timeout handlers can edit the message
+    to reflect the disabled state (previously this was never set via this path).
+    """
     kwargs = {"embed": embed, "view": view, "content": None}
+    msg: discord.Message | None = None
+
     if is_edit and not interaction.response.is_done():
         await interaction.response.edit_message(**kwargs)
+        try:
+            msg = await interaction.original_response()
+        except discord.HTTPException:
+            pass
     elif interaction.response.is_done():
         try:
-            await interaction.edit_original_response(**kwargs)
+            msg = await interaction.edit_original_response(**kwargs)
         except discord.NotFound:
-            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+            msg = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
     else:
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        try:
+            msg = await interaction.original_response()
+        except discord.HTTPException:
+            pass
+
+    # FIX: assign message to the view so on_timeout can edit it
+    if view is not None and msg is not None and hasattr(view, "message"):
+        view.message = msg
