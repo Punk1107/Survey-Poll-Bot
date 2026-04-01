@@ -1,0 +1,32 @@
+# render.yaml
+# Deploy configuration for Render.com
+#
+# How to use:
+#   1. Push this repo to GitHub
+#   2. Go to https://dashboard.render.com → New → Web Service
+#   3. Connect your GitHub repo
+#   4. Render will auto-detect this file and use it
+#
+# Environment variables to set in Render dashboard:
+#   DISCORD_TOKEN   → your bot token
+#   DATABASE_URL    → sqlite:///surveys.db  (or a PostgreSQL URL for prod)
+#   LOG_LEVEL       → INFO  (or DEBUG for troubleshooting)
+
+services:
+  - type: web
+    name: survey-poll-bot
+    runtime: python
+    buildCommand: pip install -r requirement.txt
+    startCommand: python bot.py
+    plan: free          # free tier is fine; UptimeRobot keeps it warm
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false     # set manually in Render dashboard — never commit tokens
+      - key: DATABASE_URL
+        value: sqlite:///surveys.db
+      - key: LOG_LEVEL
+        value: INFO
+      - key: PORT
+        generateValue: false   # Render injects PORT automatically
+    healthCheckPath: /health   # Render uses this to know the service is up
+    autoDeploy: true           # redeploy on every push to main
