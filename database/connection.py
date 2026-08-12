@@ -16,6 +16,7 @@ All other modules should import from here (or via ``database.__init__``):
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -38,11 +39,18 @@ elif _raw_url.startswith("sqlite:///"):
     _async_url = _raw_url.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
 elif _raw_url.startswith("sqlite://"):
     _async_url = _raw_url.replace("sqlite://", "sqlite+aiosqlite://", 1)
+elif _raw_url.startswith("postgresql+asyncpg://"):
+    _async_url = _raw_url
+elif _raw_url.startswith("postgresql://"):
+    _async_url = _raw_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+elif _raw_url.startswith("postgres://"):
+    _async_url = _raw_url.replace("postgres://", "postgresql+asyncpg://", 1)
 else:
     # PostgreSQL or other async-compatible URL — pass through untouched
     _async_url = _raw_url
 
 _is_sqlite: bool = _async_url.startswith("sqlite+aiosqlite")
+DATABASE_DIALECT: str = "sqlite" if _is_sqlite else _async_url.split(":", 1)[0].split("+", 1)[0]
 
 # ── Engine ─────────────────────────────────────────────────────────────────────
 # SQLite: use StaticPool (single shared connection) to avoid WAL + multiple
@@ -57,7 +65,15 @@ if _is_sqlite:
         }
     )
 else:
-    _engine_kwargs["pool_pre_ping"] = True  # recover from stale connections
+    _engine_kwargs.update(
+        {
+            "pool_pre_ping": True,
+            "pool_size": int(os.getenv("DB_POOL_SIZE", "10")),
+            "max_overflow": int(os.getenv("DB_MAX_OVERFLOW", "20")),
+            "pool_timeout": int(os.getenv("DB_POOL_TIMEOUT", "30")),
+            "pool_recycle": int(os.getenv("DB_POOL_RECYCLE", "1800")),
+        }
+    )
 
 engine = create_async_engine(_async_url, **_engine_kwargs)
 

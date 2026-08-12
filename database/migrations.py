@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 from typing import Callable, Awaitable
 
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from .connection import engine
@@ -35,6 +35,39 @@ from .connection import engine
 log = logging.getLogger(__name__)
 
 MigrationFn = Callable[[AsyncConnection], Awaitable[None]]
+
+
+async def _table_exists(conn: AsyncConnection, table_name: str) -> bool:
+    """Return True when table_name exists for the current SQL dialect."""
+    return await conn.run_sync(lambda sync_conn: inspect(sync_conn).has_table(table_name))
+
+
+async def _get_schema_version(conn: AsyncConnection) -> int:
+    """Read schema version from SQLite PRAGMA or a portable migrations table."""
+    if conn.dialect.name == "sqlite":
+        result = await conn.execute(text("PRAGMA user_version"))
+        return int(result.scalar_one())
+
+    await conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """))
+    result = await conn.execute(text("SELECT COALESCE(MAX(version), 0) FROM schema_migrations"))
+    return int(result.scalar_one() or 0)
+
+
+async def _set_schema_version(conn: AsyncConnection, version: int) -> None:
+    """Persist schema version for the current SQL dialect."""
+    if conn.dialect.name == "sqlite":
+        await conn.execute(text(f"PRAGMA user_version = {version}"))
+        return
+
+    await conn.execute(
+        text("INSERT INTO schema_migrations (version) VALUES (:version) ON CONFLICT (version) DO NOTHING"),
+        {"version": version},
+    )
 
 
 # ── Individual migrations ──────────────────────────────────────────────────────
@@ -59,10 +92,7 @@ async def migration_v2(conn: AsyncConnection) -> None:
 
     Idempotent: checks PRAGMA table_info before executing DDL.
     """
-    result = await conn.execute(
-        text("SELECT name FROM sqlite_master WHERE type='table' AND name='analytics_report_deliveries'")
-    )
-    if result.first() is None:
+    if not await _table_exists(conn, "analytics_report_deliveries"):
         await conn.execute(text("""
             CREATE TABLE analytics_report_deliveries (
                 guild_id    TEXT NOT NULL,
@@ -74,11 +104,29 @@ async def migration_v2(conn: AsyncConnection) -> None:
         log.info("Migration v2: created analytics_report_deliveries table")
 
 
+async def migration_v3(conn: AsyncConnection) -> None:
+    """
+    V3 - add high-volume analytics indexes.
+
+    These indexes keep the hot API/report queries fast as guilds, users,
+    channels, and daily/hourly stat rows grow across many Discord servers.
+    """
+    statements = [
+        "CREATE INDEX IF NOT EXISTS ix_daily_guild_stats_period ON daily_guild_stats (guild_id, date)",
+        "CREATE INDEX IF NOT EXISTS ix_hourly_guild_stats_period ON hourly_guild_stats (guild_id, date, hour)",
+        "CREATE INDEX IF NOT EXISTS ix_daily_user_stats_period_user ON daily_user_stats (guild_id, date, user_id)",
+        "CREATE INDEX IF NOT EXISTS ix_daily_channel_stats_period_channel ON daily_channel_stats (guild_id, date, channel_id)",
+    ]
+    for statement in statements:
+        await conn.execute(text(statement))
+
+
 # ── Migration registry ─────────────────────────────────────────────────────────
 # Order matters — migrations run in list order, one per version increment.
 MIGRATIONS: list[MigrationFn] = [
     migration_v1,   # version 1
     migration_v2,   # version 2
+    migration_v3,   # version 3
 ]
 
 
@@ -92,9 +140,8 @@ async def run_migrations() -> None:
     index (0-based) is >= current version, then bumps the PRAGMA.
     """
     async with engine.begin() as conn:
-        result = await conn.execute(text("PRAGMA user_version"))
-        current_version: int = result.scalar_one()
-        log.debug("Database user_version = %d, available migrations = %d", current_version, len(MIGRATIONS))
+        current_version = await _get_schema_version(conn)
+        log.debug("Database schema version = %d, available migrations = %d", current_version, len(MIGRATIONS))
 
         for idx, migration_fn in enumerate(MIGRATIONS):
             version = idx + 1  # 1-based
@@ -102,5 +149,5 @@ async def run_migrations() -> None:
                 continue  # already applied
             log.info("Applying migration v%d (%s)…", version, migration_fn.__name__)
             await migration_fn(conn)
-            await conn.execute(text(f"PRAGMA user_version = {version}"))
+            await _set_schema_version(conn, version)
             log.info("Migration v%d applied successfully.", version)

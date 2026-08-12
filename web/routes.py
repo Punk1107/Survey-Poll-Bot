@@ -21,11 +21,12 @@ import json
 import math
 import platform
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from aiohttp import web
 
+from services.analytics_service import AnalyticsService
 from web.health import build_health_payload
 
 if TYPE_CHECKING:
@@ -177,6 +178,49 @@ def _fmt_uptime(seconds: float) -> str:
     return f"{m}m {s}s"
 
 
+def _json(payload: dict | list, status: int = 200) -> web.Response:
+    response = web.Response(
+        content_type="application/json",
+        text=json.dumps(payload, separators=(",", ":"), default=str),
+        status=status,
+    )
+    response.enable_compression()
+    return response
+
+
+def _parse_int(value: str, name: str, *, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(text=json.dumps({"error": f"{name} must be an integer"}))
+    if parsed < minimum or parsed > maximum:
+        raise web.HTTPBadRequest(text=json.dumps({"error": f"{name} must be between {minimum} and {maximum}"}))
+    return parsed
+
+
+def _parse_period(request: web.Request, *, default_days: int = 7, max_days: int = 90) -> tuple[date, date, int]:
+    params = request.rel_url.query
+    if "start" in params or "end" in params:
+        if "start" not in params or "end" not in params:
+            raise web.HTTPBadRequest(text=json.dumps({"error": "start and end must be provided together"}))
+        try:
+            start = date.fromisoformat(params["start"])
+            end = date.fromisoformat(params["end"])
+        except ValueError:
+            raise web.HTTPBadRequest(text=json.dumps({"error": "start and end must use YYYY-MM-DD"}))
+        if start > end:
+            raise web.HTTPBadRequest(text=json.dumps({"error": "start must be before or equal to end"}))
+        days = (end - start).days + 1
+        if days > max_days:
+            raise web.HTTPBadRequest(text=json.dumps({"error": f"date range cannot exceed {max_days} days"}))
+        return start, end, days
+
+    days = _parse_int(params.get("days", str(default_days)), "days", minimum=1, maximum=max_days)
+    end = datetime.now(timezone.utc).date()
+    start = end - timedelta(days=days - 1)
+    return start, end, days
+
+
 # ── Route handlers ─────────────────────────────────────────────────────────────
 
 def make_routes(bot: "discord.Client") -> web.RouteTableDef:
@@ -187,6 +231,7 @@ def make_routes(bot: "discord.Client") -> web.RouteTableDef:
         bot: Discord client instance (injected for live metrics).
     """
     routes = web.RouteTableDef()
+    analytics = AnalyticsService()
 
     @routes.get("/")
     async def index(_request: web.Request) -> web.Response:
@@ -213,11 +258,7 @@ def make_routes(bot: "discord.Client") -> web.RouteTableDef:
     async def health(_request: web.Request) -> web.Response:
         """JSON health payload for monitoring tools."""
         payload = build_health_payload(bot)
-        return web.Response(
-            content_type="application/json",
-            text=json.dumps(payload),
-            status=200 if payload["status"] == "ok" else 503,
-        )
+        return _json(payload, status=200 if payload["status"] == "ok" else 503)
 
     @routes.get("/ping")
     async def ping(_request: web.Request) -> web.Response:
@@ -228,29 +269,52 @@ def make_routes(bot: "discord.Client") -> web.RouteTableDef:
 
     @routes.get("/api/guild/{guild_id}/stats")
     async def api_guild_stats(request: web.Request) -> web.Response:
-        """Guild stats API — not implemented in V1."""
-        return web.Response(
-            content_type="application/json",
-            text=json.dumps({"error": "Not implemented in V1"}),
-            status=501,
+        """Guild stats API."""
+        guild_id = _parse_int(request.match_info["guild_id"], "guild_id", minimum=1, maximum=10**30)
+        start, end, days = _parse_period(request)
+        summary = await analytics.summary(guild_id, start, end)
+        limit = _parse_int(request.rel_url.query.get("limit", "10"), "limit", minimum=1, maximum=50)
+        leaderboard = await analytics.leaderboard(guild_id, start, end, limit)
+        return _json(
+            {
+                "guild_id": str(guild_id),
+                "period": {"start": start, "end": end, "days": days},
+                "summary": summary,
+                "leaderboard": [
+                    {"display_name": name, "messages": messages}
+                    for name, messages in leaderboard
+                ],
+            }
         )
 
     @routes.get("/api/guild/{guild_id}/weekly")
     async def api_guild_weekly(request: web.Request) -> web.Response:
-        """Guild weekly report API — not implemented in V1."""
-        return web.Response(
-            content_type="application/json",
-            text=json.dumps({"error": "Not implemented in V1"}),
-            status=501,
+        """Guild weekly report API."""
+        guild_id = _parse_int(request.match_info["guild_id"], "guild_id", minimum=1, maximum=10**30)
+        start, end, days = _parse_period(request, default_days=7, max_days=31)
+        summary = await analytics.summary(guild_id, start, end)
+        return _json(
+            {
+                "guild_id": str(guild_id),
+                "period": {"start": start, "end": end, "days": days},
+                "summary": summary,
+            }
         )
 
     @routes.get("/api/user/{guild_id}/{user_id}")
     async def api_user_stats(request: web.Request) -> web.Response:
-        """User stats API — not implemented in V1."""
-        return web.Response(
-            content_type="application/json",
-            text=json.dumps({"error": "Not implemented in V1"}),
-            status=501,
+        """User stats API."""
+        guild_id = _parse_int(request.match_info["guild_id"], "guild_id", minimum=1, maximum=10**30)
+        user_id = _parse_int(request.match_info["user_id"], "user_id", minimum=1, maximum=10**30)
+        start, end, days = _parse_period(request)
+        summary = await analytics.summary(guild_id, start, end, user_id=user_id)
+        return _json(
+            {
+                "guild_id": str(guild_id),
+                "user_id": str(user_id),
+                "period": {"start": start, "end": end, "days": days},
+                "summary": summary,
+            }
         )
 
     return routes
