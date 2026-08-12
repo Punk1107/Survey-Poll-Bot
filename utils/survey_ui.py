@@ -1,7 +1,14 @@
+"""
+utils/survey_ui.py
+───────────────────
+Survey question UI rendering helpers (send_question_ui, embeds, progress bar).
+"""
+
+from __future__ import annotations
+
 import logging
 
 import discord
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from models import Question, Choice
 
@@ -59,7 +66,6 @@ async def send_question_ui(
     Render the question UI (View or Modal) for a given question.
     When question is None, shows the completion message.
     """
-    # ── Survey complete ──────────────────────────────────────────────────────
     if not question:
         embed = discord.Embed(
             title="🎉 Survey Completed!",
@@ -79,10 +85,8 @@ async def send_question_ui(
             await interaction.response.send_message(embed=embed, ephemeral=True)
         return
 
-    # ── Build the embed ──────────────────────────────────────────────────────
     embed = _question_embed(question, current_num, total)
 
-    # ── Route to the correct UI component ────────────────────────────────────
     if question.qtype == "mcq":
         from views.mcq import MCQView
         from database import get_session
@@ -92,8 +96,6 @@ async def send_question_ui(
             )
             choices = list(result.scalars().all())
 
-        # Discord forbids a Select with zero options — guard here
-        # so a misconfigured MCQ question gets a clear error instead of a crash.
         if not choices:
             error_embed = discord.Embed(
                 title="⚠️ Question Setup Incomplete",
@@ -130,7 +132,6 @@ async def send_question_ui(
     elif question.qtype == "text":
         from views.text import TextModal, TextPromptView
         if not is_edit and not interaction.response.is_done():
-            # Can pop modal directly on fresh interaction
             await interaction.response.send_modal(
                 TextModal(
                     survey_id=survey_id,
@@ -141,7 +142,6 @@ async def send_question_ui(
                 )
             )
             return
-        # After an edit, send a "Click to answer" button instead
         view = TextPromptView(
             survey_id=survey_id,
             question_id=question.id,
@@ -168,11 +168,6 @@ async def _send(
     view: discord.ui.View | None,
     is_edit: bool,
 ):
-    """
-    Central dispatcher — handles edit vs. new message vs. followup.
-    Also assigns `view.message` so on_timeout handlers can edit the message
-    to reflect the disabled state (previously this was never set via this path).
-    """
     kwargs = {"embed": embed, "view": view, "content": None}
     msg: discord.Message | None = None
 
@@ -194,6 +189,5 @@ async def _send(
         except discord.HTTPException:
             pass
 
-    # FIX: assign message to the view so on_timeout can edit it
     if view is not None and msg is not None and hasattr(view, "message"):
         view.message = msg

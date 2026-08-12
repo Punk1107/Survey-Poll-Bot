@@ -1,9 +1,9 @@
 <div align="center">
-  <img src="assets/banner.png" alt="Survey Poll Bot Banner" width="100%">
+  <img src="assets/banner.png" alt="Survey Poll & Analytics Bot Banner" width="100%">
   <br />
-  <img src="assets/logo.png" alt="Survey Poll Bot Logo" width="128">
-  <h1>Survey Poll Bot</h1>
-  <p>A professional, feature-rich Discord bot for creating surveys, collecting responses, and analyzing results — all through slash commands.</p>
+  <img src="assets/logo.png" alt="Survey Poll & Analytics Bot Logo" width="128">
+  <h1>Discord Server Analytics & Survey Poll Bot</h1>
+  <p>A modular monolith Discord bot built with <b>Python + discord.py + SQLite + Web Server + Scheduler</b> for server activity analytics, scheduled reports, and interactive surveys.</p>
 
   [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
   [![discord.py](https://img.shields.io/badge/discord.py-2.3.2%2B-5865F2?logo=discord&logoColor=white)](https://discordpy.readthedocs.io/)
@@ -17,7 +17,10 @@
 
 ## 🚀 Overview
 
-**Survey Poll Bot** is a comprehensive Discord slash-command bot built for communities, organizations, and researchers who need structured, scalable feedback collection. It features a guided multi-step survey experience, three question types, real-time analytics with visual bar charts, privacy-aware data export, and a built-in health-check web server for 24/7 uptime on platforms like [Render](https://render.com).
+**Discord Server Analytics & Survey Bot** is a high-performance, modular monolith Discord bot. It provides:
+1. **Server Activity Analytics (V1.1)** — Real-time tracking of server messages, active users, top channels, peak active hours, member join/leave trends, and automated daily/weekly scheduled reports per guild timezone.
+2. **Interactive Survey & Poll System** — Guided multi-step feedback collection with Multiple Choice (MCQ), Star Ratings (1–5), Free-Text responses, anonymous privacy protection, visual bar charts, and CSV/JSON exports.
+3. **Web Server & Health Check** — Built-in `aiohttp` web server for keep-alive monitoring on 24/7 hosting platforms like [Render](https://render.com) and UptimeRobot.
 
 ---
 
@@ -25,16 +28,16 @@
 
 | Category | Details |
 | :--- | :--- |
-| 🔘 **Multi-Type Questions** | Multiple Choice (MCQ), Star Ratings (1–5), Free-Text answers |
-| 🔒 **Privacy Modes** | Anonymous mode masks all respondent identities (even in exports) |
-| 📈 **Visual Analytics** | ASCII bar charts with percentages & vote counts for MCQ; avg/min/max for ratings |
-| 📥 **Flexible Export** | CSV (Excel-ready with utf-8-sig encoding) and JSON (API-friendly) |
-| 🎮 **Guided UX** | Interactive button/select/modal flow — participants are guided question-by-question |
-| 🔄 **Lifecycle Management** | Create → Preview → Publish → Close → Reopen → Delete with confirmation dialogs |
-| 🌐 **Keep-Alive Web Server** | Built-in `aiohttp` server exposes `/ping`, `/health` (JSON), and `/` (status dashboard) |
-| ⚡ **High-Performance DB** | SQLAlchemy 2.0 async engine, WAL mode, 128 MB mmap, busy-timeout, StaticPool |
-| 🔁 **Auto Schema Migrations** | Missing columns are added automatically on startup — no manual `ALTER TABLE` needed |
-| 🛡️ **Robust Error Handling** | Granular slash-command error handler for permissions, cooldowns, and internal errors |
+| 📊 **Server Analytics** | Messages count, active users, top channels, peak hours (0–23h), and member growth |
+| 📅 **Scheduled Reports** | Per-guild configurable report time & timezone with automated Daily and Weekly reports |
+| 🏆 **Leaderboards** | Top active server contributors for Today or the Last 7 Days |
+| ⚙️ **Guild Configuration** | Slash-command group (`/config`) for stats channel, daily/weekly toggles, report time, and timezone |
+| 🔘 **Multi-Type Surveys** | Multiple Choice (MCQ), Star Ratings (1–5), Free-Text answers |
+| 🔒 **Privacy Protection** | Anonymous survey mode masks all respondent identities with SHA-256 tokens |
+| 📥 **Flexible Export** | CSV (Excel-ready `utf-8-sig`) and JSON export |
+| 🌐 **Keep-Alive Web Server** | `aiohttp` server exposing status dashboard (`/`), health metrics (`/health`), and UptimeRobot probe (`/ping`) |
+| ⚡ **Modular Monolith** | Clear separation between Database Repositories, Discord Client/Events/Commands, Business Logic Services, Reports, and Web |
+| 🧪 **Tested Architecture** | Full test suite using `pytest` and `pytest-asyncio` |
 
 ---
 
@@ -42,10 +45,10 @@
 
 ### Prerequisites
 - **Python 3.10+**
-- A Discord Bot Token — create one at the [Discord Developer Portal](https://discord.com/developers/applications)
-- Bot must have the **`applications.commands`** scope and **`bot`** scope when invited
+- A Discord Bot Token from the [Discord Developer Portal](https://discord.com/developers/applications)
+- Bot requires **`applications.commands`** scope and **`bot`** scope with **Message Content** & **Server Members** Intent enabled.
 
-### 1. Clone & install
+### 1. Clone & Install
 
 ```bash
 git clone https://github.com/Punk1107/Survey-Poll-Bot.git
@@ -57,23 +60,26 @@ source venv/bin/activate
 # Windows:
 venv\Scripts\activate
 
-pip install -r requirement.txt
+pip install -r requirements.txt
 ```
 
-### 2. Configure environment
+### 2. Configure Environment
 
-Create a `.env` file in the project root:
+Create a `.env` file in the project root (see `.env.example`):
 
 ```env
 # Required
-DISCORD_TOKEN=your_bot_token_here
+DISCORD_TOKEN=your_discord_bot_token_here
 
-# Optional — defaults shown below
+# Database
 DATABASE_URL=sqlite:///surveys.db
+DB_PATH=data/analytics.db
+
+# Settings
+PORT=8080
+DEFAULT_TIMEZONE=Asia/Bangkok
 LOG_LEVEL=INFO
 ```
-
-> **Tip:** For production, swap `DATABASE_URL` for a PostgreSQL URL (`postgresql+asyncpg://...`) and the bot will use a connection pool automatically.
 
 ### 3. Run
 
@@ -81,166 +87,160 @@ LOG_LEVEL=INFO
 python bot.py
 ```
 
-Slash commands are synced automatically on the first `on_ready` event.
+Slash commands will automatically sync with Discord on startup.
 
 ---
 
-## ⚙️ Configuration Reference
+## ⚙️ Environment Variables Reference
 
 | Variable | Required | Default | Description |
 | :--- | :---: | :--- | :--- |
-| `DISCORD_TOKEN` | ✅ | — | Your Discord bot token |
-| `DATABASE_URL` | ❌ | `sqlite:///surveys.db` | SQLAlchemy-compatible DB URL |
-| `LOG_LEVEL` | ❌ | `INFO` | `DEBUG` · `INFO` · `WARNING` · `ERROR` |
-| `PORT` | ❌ | `8080` | Web server port (auto-set by Render) |
+| `DISCORD_TOKEN` | ✅ | — | Discord bot token |
+| `DATABASE_URL` | ❌ | `sqlite:///surveys.db` | Survey SQLAlchemy database URL |
+| `DB_PATH` | ❌ | `data/analytics.db` | Server analytics SQLite path |
+| `DEFAULT_TIMEZONE` | ❌ | `Asia/Bangkok` | Default IANA timezone for guilds |
+| `LOG_LEVEL` | ❌ | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+| `PORT` | ❌ | `8080` | Web server port (Render sets this automatically) |
 | `HOST` | ❌ | `0.0.0.0` | Web server bind address |
 
 ---
 
 ## 🎮 Command Reference
 
-All interactions use Discord **Slash Commands** under the `/survey` group.
-
-### 🛠️ Setup
+### 📊 Server Analytics Commands
 
 | Command | Description |
 | :--- | :--- |
-| `/survey create` | Create a new survey (title, anonymous toggle, optional description) |
-| `/survey add-question` | Add a question — choose type: MCQ / Rating / Text |
-| `/survey add-choice` | Add an answer option to an MCQ question (up to 25) |
+| `/stats [period]` | View server activity stats (`Today` or `Last 7 days`) |
+| `/userstats [user] [period]` | View member activity statistics (defaults to self) |
+| `/leaderboard [period]` | Show top active contributors with medal rankings |
 
-### 🚀 Publishing
-
-| Command | Description |
-| :--- | :--- |
-| `/survey preview` | Preview your survey before going live (ephemeral) |
-| `/survey publish` | Open the survey so members can answer |
-| `/survey close` | Stop accepting new responses |
-| `/survey reopen` | Reopen a previously closed survey |
-
-### 📝 Participation
+### ⚙️ Analytics Admin Configuration (`/config`)
 
 | Command | Description |
 | :--- | :--- |
-| `/survey answer` | Join a published survey — the bot guides you through each question |
+| `/config stats-channel <#channel>` | Set channel where scheduled reports will be sent |
+| `/config daily <on\|off>` | Enable or disable daily analytics reports |
+| `/config weekly <on\|off>` | Enable or disable weekly analytics reports (Mondays) |
+| `/config report-time <HH:MM>` | Set scheduled report delivery time (24-hour clock) |
+| `/config timezone <IANA>` | Set guild timezone (e.g. `Asia/Bangkok`, `UTC`, `America/New_York`) |
+| `/config status` | Show current guild analytics configuration |
 
-### 📊 Management & Results
-
-| Command | Description |
-| :--- | :--- |
-| `/survey list` | See all surveys you have created (status badges included) |
-| `/survey info` | Full metadata: status, question count, response count, creator |
-| `/survey results` | Visual analytics — bar charts, star ratings, text snippets |
-| `/survey export` | Download results as **CSV** or **JSON** |
-| `/survey delete` | ⚠️ Permanently delete a survey (requires confirmation) |
-
-### ❓ Help
+### 📋 Survey & Poll Commands (`/survey`)
 
 | Command | Description |
 | :--- | :--- |
-| `/survey help` | Show this command reference inside Discord |
+| `/survey create` | Create a new survey |
+| `/survey add-question` | Add a question (MCQ / Rating / Text) |
+| `/survey add-choice` | Add choice option to MCQ question |
+| `/survey preview` | Preview survey before publishing |
+| `/survey publish` | Publish survey for members to answer |
+| `/survey answer` | Join & answer a published survey |
+| `/survey close` | Close a survey |
+| `/survey list` | List surveys you created |
+| `/survey results` | View live visual analytics (bar charts / ratings) |
+| `/survey export` | Download survey responses as CSV or JSON |
+| `/survey delete` | Delete a survey |
 
-### ⚡ Typical Workflow
+---
 
-```
-1. /survey create          → give your survey a title
-2. /survey add-question    → add questions (repeat for each)
-3. /survey add-choice      → add options to MCQ questions
-4. /survey preview         → double-check everything
-5. /survey publish         → let people answer!
-6. /survey results         → view live analytics
-7. /survey export          → download the raw data
+## 🏛️ V1.1 Architecture (Modular Monolith)
+
+The project separates Database Data Access, Discord API / Events / Commands, Business Logic Services, Report Builders, Utilities, and Web Server:
+
+```text
+discord-analytics-bot/
+│
+├── bot.py                     # Entry point (registers events/commands, starts scheduler & web)
+├── config.py                  # Environment configuration & startup validation
+├── requirements.txt           # Dependencies
+├── .env.example               # Environment variables template
+├── .gitignore                 # Git ignore rules
+├── pytest.ini                 # Pytest configuration
+├── README.md                  # Documentation
+│
+├── data/                      # Database storage directory
+│   └── analytics.db
+│
+├── database/                  # Database Layer
+│   ├── connection.py          # SQLite connection, WAL mode, StaticPool, PRAGMAs
+│   ├── migrations.py          # Schema versioning (user_version PRAGMA)
+│   ├── survey_helpers.py      # Survey domain queries
+│   └── repositories/          # Data Access Layer (Repository Pattern)
+│       ├── guild_repository.py     # analytics_guilds & guild_settings CRUD
+│       ├── user_repository.py      # analytics_users & daily_user_stats CRUD
+│       ├── channel_repository.py   # analytics_channels & daily_channel_stats CRUD
+│       ├── activity_repository.py  # Atomic multi-table UPSERTs for message activity
+│       └── report_repository.py    # Report delivery dedup tracking
+│
+├── bot/                       # Discord Layer
+│   ├── client.py              # Bot factory with required Intents
+│   ├── events/                # Event Handlers
+│   │   ├── message_events.py  # on_message (activity tracking)
+│   │   ├── member_events.py   # on_member_join / on_member_remove
+│   │   └── guild_events.py    # on_guild_join / on_guild_remove & slash command sync
+│   └── commands/              # Slash Commands
+│       ├── stats.py           # /stats
+│       ├── userstats.py       # /userstats
+│       ├── leaderboard.py     # /leaderboard
+│       └── config.py          # /config group
+│
+├── services/                  # Business Logic Layer
+│   ├── activity_service.py    # Event processing & timezone resolution
+│   ├── analytics_service.py   # Aggregation & summary calculations
+│   ├── report_service.py      # Assembles & delivers reports
+│   └── scheduler_service.py   # 1-minute background loop for scheduled reports
+│
+├── reports/                   # Presentation & Embeds Layer
+│   ├── daily_report.py        # DailyReport data model
+│   ├── weekly_report.py       # WeeklyReport data model
+│   ├── embeds.py              # Discord Embed builders
+│   └── formatters.py          # Bar charts, numbers, percentages, peak hours
+│
+├── web/                       # Web Server Layer
+│   ├── webserver.py           # WebServer lifecycle (start/stop)
+│   ├── routes.py              # GET /, GET /health, GET /ping, /api/* stubs
+│   └── health.py              # Health check JSON payload builder
+│
+├── utils/                     # Utilities
+│   ├── logger.py              # Centralised logging setup
+│   ├── permissions.py         # Administrator / Manage Guild check
+│   ├── time.py                # Timezone & date-range helpers
+│   ├── validators.py          # Slash-command input validators
+│   └── survey_ui.py           # Survey question UI renderer
+│
+└── tests/                     # Automated Test Suite
+    ├── test_database.py       # Repository & Migration tests
+    ├── test_analytics.py      # Analytics queries & Leaderboard tests
+    ├── test_reports.py        # Report models & Embed builder tests
+    └── test_utils.py          # Time, Timezone, and Validator tests
 ```
 
 ---
 
-## 📈 Analytics & Export
+## 🧪 Testing
 
-### MCQ Stats (bar chart with %)
-```
-██████████  100%  Option A
-████░░░░░░   40%  Option B
-██░░░░░░░░   20%  Option C
+Run the automated test suite with `pytest`:
 
-📊 Total votes: 10
+```bash
+python -m pytest tests/
 ```
 
-### Rating Stats
-```
-⭐⭐⭐⭐ 4.2 / 5
-Responses: 24 | Min: 2 | Max: 5
-```
-
-### Export Formats
-- **CSV** — `utf-8-sig` encoding for seamless Excel compatibility
-- **JSON** — `records` orientation, UTF-8, pretty-printed
-- **Privacy** — Anonymous surveys automatically mask `user_id` with a SHA-256 token at export time
+All 28 tests cover Database Repositories, Migrations, Analytics Queries, Leaderboards, Report Builders, Timezone Logic, and Input Validators.
 
 ---
 
-## 🌐 Deployment on Render
+## 🌐 Web Server & Deployment
 
-The repo includes a `render.yaml` for one-click deploy to [Render.com](https://render.com).
+The bot includes an `aiohttp` web server for keep-alive probes when deployed on platforms like **Render.com**.
 
-1. Push this repo to GitHub
-2. Go to [Render Dashboard](https://dashboard.render.com) → **New → Web Service**
-3. Connect your GitHub repo — Render auto-detects `render.yaml`
-4. Set **`DISCORD_TOKEN`** in the Environment Variables tab
-5. Deploy — Render polls `/health` to verify the service is up
-
-**Keep-alive with UptimeRobot:**  
-Add a monitor pointing to `https://<your-app>.onrender.com/ping` with keyword `pong` — this prevents the free tier from sleeping.
-
-### Available Endpoints
+### Web Endpoints
 
 | Endpoint | Description |
 | :--- | :--- |
-| `GET /` | HTML status dashboard (auto-refreshes every 30s) |
-| `GET /health` | JSON health payload — HTTP 200 when ready, 503 when starting |
-| `GET /ping` | Plain-text `pong` — simplest UptimeRobot probe |
-
----
-
-## 📂 Project Structure
-
-```
-Survey-Poll-Bot/
-├── assets/            # Visual assets (logo, banner)
-├── views/
-│   ├── mcq.py         # MCQView + MCQSelect — choice dropdown UI
-│   ├── rating.py      # RatingView + RatingButton — star rating UI
-│   └── text.py        # TextModal + TextPromptView — free-text UI
-├── analytics.py       # Statistics queries & formatted field builders
-├── bot.py             # Entry point — slash command definitions & lifecycle
-├── config.py          # Environment variable loading & validation
-├── database.py        # Async SQLAlchemy engine, session factory, domain helpers
-├── export.py          # CSV / JSON export with anonymous masking
-├── models.py          # ORM models: Survey, Question, Choice, Response, Answer
-├── utils.py           # Shared UI helpers (send_question_ui, _send dispatcher)
-├── webserver.py       # aiohttp keep-alive server (/, /health, /ping)
-├── render.yaml        # Render.com deployment config
-├── requirement.txt    # Python dependencies
-└── .env               # Local secrets (not committed)
-```
-
----
-
-## 🗄️ Database Schema
-
-```
-Survey ──< Question ──< Choice
-  └──────< Response ──< Answer
-```
-
-| Table | Key Columns |
-| :--- | :--- |
-| `surveys` | `id`, `title`, `description`, `creator_id`, `is_anonymous`, `is_published`, `is_closed` |
-| `questions` | `id`, `survey_id`, `text`, `qtype` (`mcq`/`rating`/`text`), `order` |
-| `choices` | `id`, `question_id`, `text` |
-| `responses` | `id`, `survey_id`, `user_id`, `submitted_at` (unique per user/survey) |
-| `answers` | `id`, `response_id`, `question_id`, `answer` |
-
-Schema migrations run automatically on startup — new columns are added without manual intervention.
+| `GET /` | Rich HTML status dashboard (auto-refreshes every 30s) |
+| `GET /health` | JSON health metrics (`status`, `latency_ms`, `guilds`, `uptime_s`) |
+| `GET /ping` | Plain-text `pong` probe for UptimeRobot |
 
 ---
 

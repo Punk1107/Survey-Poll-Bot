@@ -1,0 +1,2 @@
+# analytics.db is stored in this directory.
+# The .db file is excluded from git (see .gitignore).

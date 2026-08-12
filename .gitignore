@@ -4,9 +4,20 @@
 # python cache
 __pycache__/
 *.pyc
+*.pyo
+.pytest_cache/
 
-# database
+# database files
 *.db
+*.db.bak
+data/*.db
+
+# logs
+bot.log
 
 # vscode / editor
 .vscode/
+
+# virtual env
+.venv/
+venv/
