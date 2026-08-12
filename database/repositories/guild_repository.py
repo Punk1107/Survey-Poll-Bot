@@ -46,6 +46,9 @@ class GuildRepository:
             else:
                 row.name = name
                 row.member_count = member_count
+                settings_row = await session.get(GuildSettings, gid)
+                if settings_row is None:
+                    session.add(GuildSettings(guild_id=gid, timezone=DEFAULT_TIMEZONE))
 
     async def remove(self, guild_id: int) -> None:
         """Delete a guild and all cascade-dependent rows."""

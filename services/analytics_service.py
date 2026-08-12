@@ -126,12 +126,20 @@ class AnalyticsService:
         return await self._guilds.all_with_channel()
 
     async def get_settings(self, guild_id: int):  # type: ignore[return]
-        """Return GuildSettings for a single guild."""
-        return await self._guilds.get_settings(guild_id)
+        """Return GuildSettings for a single guild. Auto-registers guild if not found."""
+        try:
+            return await self._guilds.get_settings(guild_id)
+        except LookupError:
+            await self.ensure_guild(guild_id, f"Guild {guild_id}")
+            return await self._guilds.get_settings(guild_id)
 
     async def update_settings(self, guild_id: int, **values: object) -> None:
-        """Update GuildSettings fields. Delegates to GuildRepository."""
-        await self._guilds.update_settings(guild_id, **values)
+        """Update GuildSettings fields. Auto-registers guild if not found."""
+        try:
+            await self._guilds.update_settings(guild_id, **values)
+        except LookupError:
+            await self.ensure_guild(guild_id, f"Guild {guild_id}")
+            await self._guilds.update_settings(guild_id, **values)
 
     async def ensure_guild(self, guild_id: int, name: str, member_count: int = 0) -> None:
         """Ensure guild is registered. Delegates to GuildRepository."""
