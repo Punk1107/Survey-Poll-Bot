@@ -116,3 +116,17 @@ async def test_summary_user_filter():
     svc = AnalyticsService()
     result = await svc.summary(1, date(2025, 1, 1), date(2025, 1, 1), user_id=100)
     assert result["messages"] == 2
+
+
+@pytest.mark.asyncio
+async def test_get_settings_auto_registers_unregistered_guild():
+    """get_settings() and update_settings() should auto-register missing guilds on demand."""
+    from services.analytics_service import AnalyticsService
+
+    svc = AnalyticsService()
+    settings = await svc.get_settings(99999)
+    assert settings.guild_id == "99999"
+
+    await svc.update_settings(99999, report_time="12:00")
+    updated = await svc.get_settings(99999)
+    assert updated.report_time == "12:00"

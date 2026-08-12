@@ -106,9 +106,22 @@ _synced = False  # Guard: only sync once across reconnects
 async def on_ready():
     global _synced
     if not _synced:
+        log.info("🔄 Syncing guilds with analytics database...")
+        synced_count = 0
+        for guild in bot.guilds:
+            try:
+                await _analytics.ensure_guild(guild.id, guild.name, guild.member_count or 0)
+                synced_count += 1
+            except Exception as exc:
+                log.warning("Failed to sync guild %s (%s): %s", guild.name, guild.id, exc)
+
+        log.info("✅ Guild sync complete: %d guild(s) synced in analytics database.", synced_count)
+        log.info("📊 Analytics ready.")
+
         await bot.tree.sync()
         _synced = True
         log.info("🔄 Slash commands synced.")
+
     guild_count = len(bot.guilds)
     log.info("✅ Bot ready as %s | Serving %d guild(s)", bot.user, guild_count)
 
