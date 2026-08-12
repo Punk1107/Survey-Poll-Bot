@@ -28,36 +28,46 @@ from analytics import mcq_stats, rating_stats, text_answers, build_mcq_field, bu
 from export import export_csv, export_json
 from database import get_next_question
 import utils
-from webserver import WebServer
+
+# ── V1.1 Analytics packages ───────────────────────────────────────────────────
+from web import WebServer
+from services import AnalyticsService, ActivityService, SchedulerService
+from bot.commands import (
+    register_stats_commands,
+    register_userstats_commands,
+    register_leaderboard_commands,
+    register_config_commands,
+)
+from bot.events import (
+    register_message_events,
+    register_member_events,
+    register_guild_events,
+)
 
 # =====================
 # LOGGING SETUP
 # =====================
-# config.py guarantees LOG_LEVEL is a valid level string (defaults to INFO).
-_log_level = getattr(logging, LOG_LEVEL, logging.INFO)
-
-logging.basicConfig(
-    level=_log_level,
-    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("bot.log", encoding="utf-8"),
-    ],
-)
+# utils.logger centralises logging config for the whole process.
+from utils.logger import setup_logging
+setup_logging(level=LOG_LEVEL, log_file="bot.log")
 log = logging.getLogger("survey_bot")
 
 # =====================
 # BOT SETUP
 # =====================
 intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ── Slash-command group ──────────────────────────────────────────────────────
 survey = app_commands.Group(name="survey", description="Survey & Poll system")
 bot.tree.add_command(survey)
 
-# ── Web-server (keep-alive for Render / UptimeRobot) ─────────────────────────
+# ── Analytics services (V1.1 packages) ───────────────────────────────────────────
+_analytics = AnalyticsService()
+_activity = ActivityService()
+_scheduler = SchedulerService(bot, _analytics)
 _web = WebServer(bot)
 
 
@@ -70,8 +80,14 @@ async def setup_hook():
         await conn.run_sync(Base.metadata.create_all)
     await run_migrations()
     log.info("Database tables created / verified.")
-    # Start the keep-alive web-server so Render keeps the dyno alive
-    # and UptimeRobot has an endpoint to ping.
+    register_message_events(bot, _activity)
+    register_member_events(bot, _activity)
+    register_guild_events(bot, _analytics)
+    register_stats_commands(bot.tree, _analytics)
+    register_userstats_commands(bot.tree, _analytics)
+    register_leaderboard_commands(bot.tree, _analytics)
+    register_config_commands(bot.tree, _analytics)
+    _scheduler.start()
     await _web.start()
 
 
@@ -80,12 +96,10 @@ async def setup_hook():
 # =====================
 @bot.event
 async def on_close():
+    _scheduler.stop()
     await _web.stop()
 
 
-# =====================
-# ON READY
-# =====================
 _synced = False  # Guard: only sync once across reconnects
 
 @bot.event

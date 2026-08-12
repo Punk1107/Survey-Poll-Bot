@@ -1,5 +1,5 @@
 from sqlalchemy import (
-    Column, Integer, String, Boolean,
+    Column, Integer, String, Boolean, Date,
     DateTime, ForeignKey, UniqueConstraint, Index
 )
 from sqlalchemy.orm import declarative_base, relationship
@@ -87,3 +87,91 @@ class Answer(Base):
     __table_args__ = (
         Index("ix_answers_response_question", "response_id", "question_id"),
     )
+
+
+# Server analytics deliberately stores daily aggregates only.  It never stores
+# message content or message IDs.
+class AnalyticsGuild(Base):
+    __tablename__ = "analytics_guilds"
+
+    guild_id = Column(String, primary_key=True)
+    name = Column(String(200), nullable=False)
+    member_count = Column(Integer, default=0, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+class GuildSettings(Base):
+    __tablename__ = "guild_settings"
+
+    guild_id = Column(String, ForeignKey("analytics_guilds.guild_id", ondelete="CASCADE"), primary_key=True)
+    stats_channel_id = Column(String, nullable=True)
+    daily_enabled = Column(Boolean, default=False, nullable=False)
+    weekly_enabled = Column(Boolean, default=False, nullable=False)
+    report_time = Column(String(5), default="09:00", nullable=False)
+    timezone = Column(String(64), default="Asia/Bangkok", nullable=False)
+
+
+class AnalyticsUser(Base):
+    __tablename__ = "analytics_users"
+
+    guild_id = Column(String, ForeignKey("analytics_guilds.guild_id", ondelete="CASCADE"), primary_key=True)
+    user_id = Column(String, primary_key=True)
+    display_name = Column(String(128), nullable=False)
+    is_bot = Column(Boolean, default=False, nullable=False)
+
+
+class AnalyticsChannel(Base):
+    __tablename__ = "analytics_channels"
+
+    guild_id = Column(String, ForeignKey("analytics_guilds.guild_id", ondelete="CASCADE"), primary_key=True)
+    channel_id = Column(String, primary_key=True)
+    name = Column(String(128), nullable=False)
+
+
+class DailyGuildStat(Base):
+    __tablename__ = "daily_guild_stats"
+
+    guild_id = Column(String, ForeignKey("analytics_guilds.guild_id", ondelete="CASCADE"), primary_key=True)
+    date = Column(Date, primary_key=True)
+    messages = Column(Integer, default=0, server_default="0", nullable=False)
+    active_users = Column(Integer, default=0, server_default="0", nullable=False)
+    new_members = Column(Integer, default=0, server_default="0", nullable=False)
+    left_members = Column(Integer, default=0, server_default="0", nullable=False)
+    peak_hour = Column(Integer, nullable=True)
+
+
+class DailyUserStat(Base):
+    __tablename__ = "daily_user_stats"
+
+    guild_id = Column(String, primary_key=True)
+    user_id = Column(String, primary_key=True)
+    date = Column(Date, primary_key=True)
+    messages = Column(Integer, default=0, server_default="0", nullable=False)
+    __table_args__ = (Index("ix_daily_user_stats_lookup", "guild_id", "date", "messages"),)
+
+
+class DailyChannelStat(Base):
+    __tablename__ = "daily_channel_stats"
+
+    guild_id = Column(String, primary_key=True)
+    channel_id = Column(String, primary_key=True)
+    date = Column(Date, primary_key=True)
+    messages = Column(Integer, default=0, server_default="0", nullable=False)
+    __table_args__ = (Index("ix_daily_channel_stats_lookup", "guild_id", "date", "messages"),)
+
+
+class HourlyGuildStat(Base):
+    __tablename__ = "hourly_guild_stats"
+
+    guild_id = Column(String, primary_key=True)
+    date = Column(Date, primary_key=True)
+    hour = Column(Integer, primary_key=True)
+    messages = Column(Integer, default=0, server_default="0", nullable=False)
+
+
+class ReportDelivery(Base):
+    __tablename__ = "analytics_report_deliveries"
+
+    guild_id = Column(String, primary_key=True)
+    report_type = Column(String(10), primary_key=True)
+    period_end = Column(Date, primary_key=True)
