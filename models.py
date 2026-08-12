@@ -138,6 +138,7 @@ class DailyGuildStat(Base):
     new_members = Column(Integer, default=0, server_default="0", nullable=False)
     left_members = Column(Integer, default=0, server_default="0", nullable=False)
     peak_hour = Column(Integer, nullable=True)
+    __table_args__ = (Index("ix_daily_guild_stats_period", "guild_id", "date"),)
 
 
 class DailyUserStat(Base):
@@ -167,6 +168,7 @@ class HourlyGuildStat(Base):
     date = Column(Date, primary_key=True)
     hour = Column(Integer, primary_key=True)
     messages = Column(Integer, default=0, server_default="0", nullable=False)
+    __table_args__ = (Index("ix_hourly_guild_stats_period", "guild_id", "date", "hour"),)
 
 
 class ReportDelivery(Base):

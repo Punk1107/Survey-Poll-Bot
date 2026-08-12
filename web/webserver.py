@@ -32,12 +32,30 @@ from typing import TYPE_CHECKING
 
 from aiohttp import web
 
+import config
 from web.routes import make_routes
 
 if TYPE_CHECKING:
     import discord
 
 log = logging.getLogger(__name__)
+
+
+@web.middleware
+async def _api_headers_middleware(request: web.Request, handler):  # type: ignore[no-untyped-def]
+    if request.method == "OPTIONS":
+        response = web.Response(status=204)
+    else:
+        response = await handler(request)
+
+    if request.path.startswith("/api/"):
+        response.headers["Access-Control-Allow-Origin"] = os.getenv("API_CORS_ORIGIN", "*")
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        response.headers["Access-Control-Max-Age"] = "86400"
+        response.headers["Cache-Control"] = "public, max-age=15"
+
+    return response
 
 
 class WebServer:
@@ -52,7 +70,10 @@ class WebServer:
         if self._runner is not None:
             return  # already running
 
-        app = web.Application()
+        app = web.Application(
+            client_max_size=config.API_MAX_BODY_BYTES,
+            middlewares=[_api_headers_middleware],
+        )
         app.add_routes(make_routes(self._bot))
 
         self._runner = web.AppRunner(app, access_log=None)

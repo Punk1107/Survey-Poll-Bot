@@ -9,6 +9,8 @@ DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///surveys.db")
 DB_PATH: str = os.getenv("DB_PATH", "data/analytics.db")
 DEFAULT_TIMEZONE: str = os.getenv("DEFAULT_TIMEZONE", "Asia/Bangkok")
 WEB_PORT: int = int(os.getenv("PORT", "8080"))
+API_MAX_BODY_MB: int = int(os.getenv("API_MAX_BODY_MB", "10"))
+API_MAX_BODY_BYTES: int = API_MAX_BODY_MB * 1024 * 1024
 _raw_log_level: str = os.getenv("LOG_LEVEL", "INFO").upper()
 
 # ── Startup validation ──────────────────────────────────────────────────────

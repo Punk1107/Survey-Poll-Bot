@@ -105,25 +105,6 @@ class ActivityRepository:
                 DO UPDATE SET messages = messages + 1
             """), params)
 
-            # Recalculate derived fields: active_users and peak_hour
-            await session.execute(text("""
-                UPDATE daily_guild_stats
-                SET
-                    active_users = (
-                        SELECT COUNT(*)
-                        FROM daily_user_stats
-                        WHERE guild_id = :g AND date = :d AND messages > 0
-                    ),
-                    peak_hour = (
-                        SELECT hour
-                        FROM hourly_guild_stats
-                        WHERE guild_id = :g AND date = :d
-                        ORDER BY messages DESC, hour ASC
-                        LIMIT 1
-                    )
-                WHERE guild_id = :g AND date = :d
-            """), params)
-
     async def record_member_join(self, guild_id: int, day: date) -> None:
         """Increment ``new_members`` counter for *guild_id* on *day*."""
         await self._bump_member_field(guild_id, day, "new_members")
