@@ -66,11 +66,24 @@ class ReportService:
             True on success, False if the channel was not found or send failed.
         """
         channel = self._bot.get_channel(channel_id)
-        if not isinstance(channel, discord.TextChannel):
+        if channel is None:
+            try:
+                channel = await self._bot.fetch_channel(channel_id)
+            except Exception as exc:
+                log.warning(
+                    "Failed to fetch channel %s for %s report delivery: %s",
+                    channel_id,
+                    report_type,
+                    exc,
+                )
+                return False
+
+        if not hasattr(channel, "send"):
             log.warning(
-                "Cannot deliver %s report — channel %s not found or not a TextChannel",
+                "Cannot deliver %s report — channel %s is not sendable (type: %s)",
                 report_type,
                 channel_id,
+                type(channel).__name__,
             )
             return False
 
@@ -79,6 +92,10 @@ class ReportService:
         stats = await self._analytics.summary(guild_id, start, period_end)
 
         if report_type == "weekly":
+            prev_start = start - timedelta(days=7)
+            prev_end = start - timedelta(days=1)
+            prev_stats = await self._analytics.summary(guild_id, prev_start, prev_end)
+            stats["prev_messages"] = prev_stats.get("messages", 0)
             embed = build_weekly_embed(stats, start, period_end)
         else:
             embed = build_daily_embed(stats, period_end)
@@ -102,3 +119,4 @@ class ReportService:
                 exc,
             )
             return False
+
