@@ -175,4 +175,63 @@ def register_config_commands(
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    # ── /config test-report ───────────────────────────────────────────────────
+
+    @config_group.command(
+        name="test-report",
+        description="Send a test analytics report immediately to the configured channel",
+    )
+    @app_commands.describe(report_type="Type of report to test (daily or weekly)")
+    @app_commands.choices(
+        report_type=[
+            app_commands.Choice(name="Daily Report", value="daily"),
+            app_commands.Choice(name="Weekly Report", value="weekly"),
+        ]
+    )
+    @app_commands.check(admin_check)
+    async def test_report(
+        interaction: discord.Interaction,
+        report_type: app_commands.Choice[str],
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            setting = await analytics.get_settings(interaction.guild_id)
+        except LookupError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+
+        if not setting.stats_channel_id:
+            await interaction.followup.send(
+                "❌ Report channel is not configured. Use `/config stats-channel` first.",
+                ephemeral=True,
+            )
+            return
+
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        from services.report_service import ReportService
+
+        now = datetime.now(ZoneInfo(setting.timezone))
+        period_end = (now - timedelta(days=1)).date()
+
+        report_svc = ReportService(interaction.client, analytics)
+        success = await report_svc.deliver(
+            interaction.guild_id,
+            int(setting.stats_channel_id),
+            report_type.value,
+            period_end,
+        )
+
+        if success:
+            await interaction.followup.send(
+                f"✅ **{report_type.name}** sent successfully to <#{setting.stats_channel_id}>!",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                f"❌ Failed to send **{report_type.name}**. Please check bot permissions in <#{setting.stats_channel_id}>.",
+                ephemeral=True,
+            )
+
     tree.add_command(config_group)
+
