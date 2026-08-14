@@ -94,22 +94,24 @@ class AnalyticsService:
             )
             peak = (await session.execute(hour_stmt)).first()
 
-        active_users = await self._users.active_count(guild_id, start, end)
-        top_channel = await self._channels.top_channel(guild_id, start, end)
+            active_users = await self._users.active_count(guild_id, start, end, session=session)
+            top_channel = await self._channels.top_channel(guild_id, start, end, session=session)
+
+            if user_id is not None:
+                user_msgs = await self._users.total_messages(
+                    guild_id, user_id, start, end, session=session
+                )
+            else:
+                user_msgs = None
 
         result: dict = {
-            "messages": int(messages),
+            "messages": int(messages) if user_id is None else int(user_msgs or 0),
             "active_users": int(active_users),
             "new_members": int(joined),
             "left_members": int(left),
             "top_channel": top_channel,
             "peak_hour": peak[0] if peak else None,
         }
-
-        if user_id is not None:
-            result["messages"] = await self._users.total_messages(
-                guild_id, user_id, start, end
-            )
 
         return result
 

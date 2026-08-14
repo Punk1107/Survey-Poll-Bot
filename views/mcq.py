@@ -88,7 +88,7 @@ class MCQSelect(discord.ui.Select):
         seen: set[str] = set()
         unique_options: list[str] = []
         for o in options[:25]:
-            label = o[:100]
+            label = o.strip()[:100] or "Option"
             if label not in seen:
                 seen.add(label)
                 unique_options.append(label)

@@ -118,24 +118,16 @@ class ActivityService:
         self, guild_id: int, guild_name: str, member_count: int
     ) -> None:
         """Record a member-join event."""
-        await self._guilds.upsert(guild_id, guild_name, member_count)
-        try:
-            settings = await self._guilds.get_settings(guild_id)
-            day = today_in(settings.timezone)
-        except LookupError:
-            from datetime import date
-            day = date.today()
+        await self._ensure_guild_cached(guild_id, guild_name, member_count)
+        tz = await self._timezone_for_guild(guild_id)
+        day = datetime.now(tz).date()
         await self._activity.record_member_join(guild_id, day)
 
     async def record_member_leave(
         self, guild_id: int, guild_name: str, member_count: int
     ) -> None:
         """Record a member-leave event."""
-        await self._guilds.upsert(guild_id, guild_name, member_count)
-        try:
-            settings = await self._guilds.get_settings(guild_id)
-            day = today_in(settings.timezone)
-        except LookupError:
-            from datetime import date
-            day = date.today()
+        await self._ensure_guild_cached(guild_id, guild_name, member_count)
+        tz = await self._timezone_for_guild(guild_id)
+        day = datetime.now(tz).date()
         await self._activity.record_member_leave(guild_id, day)

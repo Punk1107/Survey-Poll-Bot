@@ -130,3 +130,50 @@ async def test_get_settings_auto_registers_unregistered_guild():
     await svc.update_settings(99999, report_time="12:00")
     updated = await svc.get_settings(99999)
     assert updated.report_time == "12:00"
+
+
+@pytest.mark.asyncio
+async def test_repository_with_explicit_session():
+    """Repositories should work correctly when given an existing session."""
+    from database.connection import get_session
+    from database.repositories import UserRepository, ChannelRepository
+
+    await _seed_message(user_id=100, display_name="Alice")
+    user_repo = UserRepository()
+    chan_repo = ChannelRepository()
+
+    async with get_session() as session:
+        active = await user_repo.active_count(1, date(2025, 1, 1), date(2025, 1, 1), session=session)
+        assert active == 1
+
+        top = await chan_repo.top_channel(1, date(2025, 1, 1), date(2025, 1, 1), session=session)
+        assert top == "general"
+
+        total_u = await user_repo.total_messages(1, 100, date(2025, 1, 1), date(2025, 1, 1), session=session)
+        assert total_u == 1
+
+        total_c = await chan_repo.total_messages(1, 10, date(2025, 1, 1), date(2025, 1, 1), session=session)
+        assert total_c == 1
+
+        lb = await user_repo.leaderboard(1, date(2025, 1, 1), date(2025, 1, 1), limit=5, session=session)
+        assert len(lb) == 1
+        assert lb[0][0] == "Alice"
+
+
+@pytest.mark.asyncio
+async def test_activity_service_member_join_and_leave():
+    """ActivityService should record member joins and leaves accurately."""
+    from services.activity_service import ActivityService
+    from services.analytics_service import AnalyticsService
+
+    act_svc = ActivityService()
+    await act_svc.record_member_join(guild_id=1, guild_name="Test", member_count=11)
+    await act_svc.record_member_leave(guild_id=1, guild_name="Test", member_count=10)
+
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).date()
+
+    analytics = AnalyticsService()
+    summary = await analytics.summary(1, today, today)
+    assert summary["new_members"] == 1
+    assert summary["left_members"] == 1
