@@ -101,12 +101,13 @@ class SchedulerService:
         now = datetime.now(ZoneInfo(settings.timezone))
         current_time_str = now.strftime("%H:%M")
 
-        # Act when current time has reached or passed the configured report time
-        if current_time_str < settings.report_time:
-            return
-
-        # Use yesterday as period_end so the report covers a complete day/week
-        period_end = (now - timedelta(days=1)).date()
+        # If we have reached today's report time, the report covers yesterday.
+        # If we haven't reached it yet, the report should cover the day before yesterday.
+        # This prevents skipping a day entirely if the bot restarts across midnight.
+        if current_time_str >= settings.report_time:
+            period_end = (now - timedelta(days=1)).date()
+        else:
+            period_end = (now - timedelta(days=2)).date()
 
         guild_id = int(settings.guild_id)
         channel_id = int(settings.stats_channel_id)

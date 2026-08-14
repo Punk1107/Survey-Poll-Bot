@@ -65,7 +65,7 @@ def register_leaderboard_commands(
 
         embed = discord.Embed(
             title="🏆 Top Contributors",
-            description=description,
+            description=description[:4000],
             colour=discord.Colour.gold(),
         )
         embed.set_footer(text=f"Analytics Bot V1.1 • {period_label}")

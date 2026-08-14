@@ -106,17 +106,19 @@ _synced = False  # Guard: only sync once across reconnects
 async def on_ready():
     global _synced
     if not _synced:
-        log.info("🔄 Syncing guilds with analytics database...")
-        synced_count = 0
-        for guild in bot.guilds:
-            try:
-                await _analytics.ensure_guild(guild.id, guild.name, guild.member_count or 0)
-                synced_count += 1
-            except Exception as exc:
-                log.warning("Failed to sync guild %s (%s): %s", guild.name, guild.id, exc)
+        async def sync_guilds():
+            log.info("🔄 Syncing guilds with analytics database (background)...")
+            synced_count = 0
+            for guild in bot.guilds:
+                try:
+                    await _analytics.ensure_guild(guild.id, guild.name, guild.member_count or 0)
+                    synced_count += 1
+                except Exception as exc:
+                    log.warning("Failed to sync guild %s (%s): %s", guild.name, guild.id, exc)
+            log.info("✅ Guild sync complete: %d guild(s) synced in analytics database.", synced_count)
+            log.info("📊 Analytics ready.")
 
-        log.info("✅ Guild sync complete: %d guild(s) synced in analytics database.", synced_count)
-        log.info("📊 Analytics ready.")
+        bot.loop.create_task(sync_guilds())
 
         await bot.tree.sync()
         _synced = True
@@ -155,7 +157,7 @@ async def on_app_command_error(
         log.warning("CheckFailure on /%s: %s", cmd_name, error)
     elif isinstance(error, app_commands.CommandInvokeError):
         msg = f"❌ **Internal error**: {original}"
-        log.error("CommandInvokeError in /%s: %s", cmd_name, original, exc_info=original)
+        log.error("CommandInvokeError in /%s: %s", cmd_name, original, exc_info=True)
     else:
         msg = f"❌ **{type(error).__name__}**: {error}"
         log.error("Unhandled AppCommandError in /%s: %s", cmd_name, error, exc_info=True)
@@ -174,20 +176,24 @@ async def on_app_command_error(
 # =====================
 class SurveyTransformer(app_commands.Transformer):
     async def autocomplete(self, interaction: discord.Interaction, current: str):
-        async with get_session() as session:
-            # Optimize: only select id and title, limit results
-            # ilike with index-friendly patterns if possible
-            result = await session.execute(
-                select(Survey.id, Survey.title)
-                .filter(Survey.title.ilike(f"%{current}%"))
-                .order_by(Survey.created_at.desc())
-                .limit(25)
-            )
-            surveys = result.all()
-        return [
-            app_commands.Choice(name=f"{s.id} │ {s.title[:80]}", value=str(s.id))
-            for s in surveys
-        ]
+        try:
+            async with get_session() as session:
+                # Optimize: only select id and title, limit results
+                # ilike with index-friendly patterns if possible
+                result = await session.execute(
+                    select(Survey.id, Survey.title)
+                    .filter(Survey.title.ilike(f"%{current}%"))
+                    .order_by(Survey.created_at.desc())
+                    .limit(25)
+                )
+                surveys = result.all()
+            return [
+                app_commands.Choice(name=f"{s.id} │ {s.title[:80]}", value=str(s.id))
+                for s in surveys
+            ]
+        except Exception as exc:
+            log.warning("Autocomplete error in SurveyTransformer: %s", exc)
+            return []
 
     async def transform(self, interaction: discord.Interaction, value: str) -> int:
         try:
@@ -199,21 +205,25 @@ class SurveyTransformer(app_commands.Transformer):
 class QuestionTransformer(app_commands.Transformer):
     async def autocomplete(self, interaction: discord.Interaction, current: str):
         # Only show questions from surveys the user created, if possible
-        async with get_session() as session:
-            result = await session.execute(
-                select(Question.id, Question.text)
-                .join(Survey, Survey.id == Question.survey_id)
-                .filter(
-                    Question.text.ilike(f"%{current}%"),
-                    Survey.creator_id == str(interaction.user.id),
+        try:
+            async with get_session() as session:
+                result = await session.execute(
+                    select(Question.id, Question.text)
+                    .join(Survey, Survey.id == Question.survey_id)
+                    .filter(
+                        Question.text.ilike(f"%{current}%"),
+                        Survey.creator_id == str(interaction.user.id),
+                    )
+                    .limit(25)
                 )
-                .limit(25)
-            )
-            questions = result.all()
-        return [
-            app_commands.Choice(name=f"{q.id} │ {q.text[:80]}", value=str(q.id))
-            for q in questions
-        ]
+                questions = result.all()
+            return [
+                app_commands.Choice(name=f"{q.id} │ {q.text[:80]}", value=str(q.id))
+                for q in questions
+            ]
+        except Exception as exc:
+            log.warning("Autocomplete error in QuestionTransformer: %s", exc)
+            return []
 
     async def transform(self, interaction: discord.Interaction, value: str) -> int:
         try:
@@ -275,12 +285,15 @@ async def survey_create(
     embed.set_footer(text="Next: /survey add-question")
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
-    await interaction.followup.send(
-        f"📢 **New Survey created!**\n"
-        f"📋 **{survey_title}** (ID: `{survey_id}`)\n"
-        f"👤 By {interaction.user.mention}\n"
-        f"*(Use `/survey add-question {survey_id}` to build it, then `/survey publish` to go live)*"
-    )
+    try:
+        await interaction.followup.send(
+            f"📢 **New Survey created!**\n"
+            f"📋 **{survey_title}** (ID: `{survey_id}`)\n"
+            f"👤 By {interaction.user.mention}\n"
+            f"*(Use `/survey add-question {survey_id}` to build it, then `/survey publish` to go live)*"
+        )
+    except discord.HTTPException:
+        pass
 
 
 # ── /survey add-question ──────────────────────────────────────────────────
@@ -337,11 +350,14 @@ async def add_question(
         embed.set_footer(text="Next: /survey add-choice to add options for this question")
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
-    await interaction.followup.send(
-        f"📢 **New question added to \"{survey_title}\"**\n"
-        f"❓ {text} (`{qtype.name}`)\n"
-        f"👤 By {interaction.user.mention}"
-    )
+    try:
+        await interaction.followup.send(
+            f"📢 **New question added to \"{survey_title}\"**\n"
+            f"❓ {text} (`{qtype.name}`)\n"
+            f"👤 By {interaction.user.mention}"
+        )
+    except discord.HTTPException:
+        pass
 
 
 # ── /survey add-choice ────────────────────────────────────────────────────
@@ -393,12 +409,15 @@ async def add_choice(
     embed.add_field(name="Total",    value=f"{count} option(s)", inline=True)
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
-    await interaction.followup.send(
-        f"📢 **New choice added**\n"
-        f"❓ {question_text}\n"
-        f"➕ **{text}** (now {count} option(s))\n"
-        f"👤 By {interaction.user.mention}"
-    )
+    try:
+        await interaction.followup.send(
+            f"📢 **New choice added**\n"
+            f"❓ {question_text}\n"
+            f"➕ **{text}** (now {count} option(s))\n"
+            f"👤 By {interaction.user.mention}"
+        )
+    except discord.HTTPException:
+        pass
 
 
 # ── /survey preview ───────────────────────────────────────────────────────
@@ -485,11 +504,14 @@ async def publish(
     embed.set_footer(text="Respondents can use /survey answer to participate.")
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
-    await interaction.followup.send(
-        f"🚀 **Survey now live: {survey_title}**\n"
-        f"📋 {q_count} question(s) | Use `/survey answer` to participate!\n"
-        f"👤 By {interaction.user.mention}"
-    )
+    try:
+        await interaction.followup.send(
+            f"🚀 **Survey now live: {survey_title}**\n"
+            f"📋 {q_count} question(s) | Use `/survey answer` to participate!\n"
+            f"👤 By {interaction.user.mention}"
+        )
+    except discord.HTTPException:
+        pass
 
 
 # ── /survey answer ────────────────────────────────────────────────────────
@@ -579,10 +601,13 @@ async def close(
     embed.set_footer(text="Use /survey reopen to re-open it.")
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
-    await interaction.followup.send(
-        f"🔒 **Survey closed: {survey_title}**\n"
-        f"👤 By {interaction.user.mention}"
-    )
+    try:
+        await interaction.followup.send(
+            f"🔒 **Survey closed: {survey_title}**\n"
+            f"👤 By {interaction.user.mention}"
+        )
+    except discord.HTTPException:
+        pass
 
 
 # ── /survey reopen ────────────────────────────────────────────────────────
@@ -619,11 +644,14 @@ async def reopen(
     )
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
-    await interaction.followup.send(
-        f"🔓 **Survey reopened: {survey_title}**\n"
-        f"👤 By {interaction.user.mention}\n"
-        f"Use `/survey answer` to participate!"
-    )
+    try:
+        await interaction.followup.send(
+            f"🔓 **Survey reopened: {survey_title}**\n"
+            f"👤 By {interaction.user.mention}\n"
+            f"Use `/survey answer` to participate!"
+        )
+    except discord.HTTPException:
+        pass
 
 
 # ── /survey list ──────────────────────────────────────────────────────────
@@ -892,10 +920,13 @@ class ConfirmDeleteView(discord.ui.View):
         await interaction.response.edit_message(embed=success_embed, view=None, content=None)
 
         # Public channel announcement — consistent with close / reopen / publish
-        await interaction.followup.send(
-            f"🗑️ **Survey deleted: {self.survey_title}**\n"
-            f"👤 Deleted by {interaction.user.mention}"
-        )
+        try:
+            await interaction.followup.send(
+                f"🗑️ **Survey deleted: {self.survey_title}**\n"
+                f"👤 Deleted by {interaction.user.mention}"
+            )
+        except discord.HTTPException:
+            pass
         self.stop()
 
     @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.secondary)

@@ -52,10 +52,10 @@ class ChannelRepository:
             )
 
     async def top_channel(
-        self, guild_id: int, start: date, end: date
+        self, guild_id: int, start: date, end: date, session: AsyncSession | None = None
     ) -> str | None:
         """Return the name of the most active channel in the date range, or None."""
-        async with get_session() as session:
+        async def _query(s: AsyncSession) -> str | None:
             stmt = (
                 select(AnalyticsChannel.name, func.sum(DailyChannelStat.messages).label("count"))
                 .join(
@@ -71,15 +71,20 @@ class ChannelRepository:
                 .order_by(text("count DESC"))
                 .limit(1)
             )
-            row = (await session.execute(stmt)).first()
+            row = (await s.execute(stmt)).first()
             return row[0] if row else None
 
+        if session is not None:
+            return await _query(session)
+        async with get_session() as s:
+            return await _query(s)
+
     async def total_messages(
-        self, guild_id: int, channel_id: int, start: date, end: date
+        self, guild_id: int, channel_id: int, start: date, end: date, session: AsyncSession | None = None
     ) -> int:
         """Return total messages in *channel_id* between *start* and *end*."""
-        async with get_session() as session:
-            count = await session.scalar(
+        async def _query(s: AsyncSession) -> int:
+            count = await s.scalar(
                 select(func.coalesce(func.sum(DailyChannelStat.messages), 0)).where(
                     DailyChannelStat.guild_id == str(guild_id),
                     DailyChannelStat.channel_id == str(channel_id),
@@ -87,3 +92,8 @@ class ChannelRepository:
                 )
             )
             return int(count or 0)
+
+        if session is not None:
+            return await _query(session)
+        async with get_session() as s:
+            return await _query(s)

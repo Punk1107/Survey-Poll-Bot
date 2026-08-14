@@ -65,11 +65,11 @@ class UserRepository:
             )
 
     async def total_messages(
-        self, guild_id: int, user_id: int, start: date, end: date
+        self, guild_id: int, user_id: int, start: date, end: date, session: AsyncSession | None = None
     ) -> int:
         """Return the total messages sent by *user_id* between *start* and *end*."""
-        async with get_session() as session:
-            count = await session.scalar(
+        async def _query(s: AsyncSession) -> int:
+            count = await s.scalar(
                 select(func.coalesce(func.sum(DailyUserStat.messages), 0)).where(
                     DailyUserStat.guild_id == str(guild_id),
                     DailyUserStat.user_id == str(user_id),
@@ -78,10 +78,17 @@ class UserRepository:
             )
             return int(count or 0)
 
-    async def active_count(self, guild_id: int, start: date, end: date) -> int:
+        if session is not None:
+            return await _query(session)
+        async with get_session() as s:
+            return await _query(s)
+
+    async def active_count(
+        self, guild_id: int, start: date, end: date, session: AsyncSession | None = None
+    ) -> int:
         """Return the number of distinct users who sent at least one message."""
-        async with get_session() as session:
-            count = await session.scalar(
+        async def _query(s: AsyncSession) -> int:
+            count = await s.scalar(
                 select(func.count(func.distinct(DailyUserStat.user_id))).where(
                     DailyUserStat.guild_id == str(guild_id),
                     DailyUserStat.date.between(start, end),
@@ -90,14 +97,19 @@ class UserRepository:
             )
             return int(count or 0)
 
+        if session is not None:
+            return await _query(session)
+        async with get_session() as s:
+            return await _query(s)
+
     async def leaderboard(
-        self, guild_id: int, start: date, end: date, limit: int = 10
+        self, guild_id: int, start: date, end: date, limit: int = 10, session: AsyncSession | None = None
     ) -> list[tuple[str, int]]:
         """
         Return the top *limit* contributors as ``[(display_name, message_count)]``,
         ordered by message count descending.
         """
-        async with get_session() as session:
+        async def _query(s: AsyncSession) -> list[tuple[str, int]]:
             stmt = (
                 select(
                     AnalyticsUser.display_name,
@@ -116,5 +128,10 @@ class UserRepository:
                 .order_by(text("count DESC"), AnalyticsUser.display_name)
                 .limit(limit)
             )
-            rows = (await session.execute(stmt)).all()
+            rows = (await s.execute(stmt)).all()
             return [(name, int(count)) for name, count in rows]
+
+        if session is not None:
+            return await _query(session)
+        async with get_session() as s:
+            return await _query(s)

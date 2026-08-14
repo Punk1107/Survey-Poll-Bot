@@ -30,12 +30,13 @@ async def upsert_answer(
 
     if not resp_id:
         response = Response(survey_id=survey_id, user_id=user_id)
-        session.add(response)
         try:
-            await session.flush()
-            resp_id = response.id
+            async with session.begin_nested():
+                session.add(response)
+                await session.flush()
+                resp_id = response.id
         except Exception:
-            await session.rollback()
+            # begin_nested() automatically rolls back only the savepoint on exception.
             result = await session.execute(
                 select(Response.id).filter_by(survey_id=survey_id, user_id=user_id)
             )

@@ -110,6 +110,15 @@ class ReportService:
                 period_end,
             )
             return True
+        except discord.Forbidden as exc:
+            log.warning(
+                "Missing permissions to send %s report to guild=%s channel=%s: %s",
+                report_type,
+                guild_id,
+                channel_id,
+                exc,
+            )
+            return False
         except discord.HTTPException as exc:
             log.warning(
                 "Failed to send %s report to guild=%s channel=%s: %s",
