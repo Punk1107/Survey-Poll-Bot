@@ -89,7 +89,7 @@ def build_daily_embed(stats: dict, report_date: date) -> discord.Embed:
     Full embed for a scheduled daily report.
 
     Args:
-        stats:       Dict from ``AnalyticsService.summary()``.
+        stats:       Dict from ``AnalyticsService.summary()`` (may include ``leaderboard``).
         report_date: The date the report covers (yesterday).
     """
     embed = discord.Embed(
@@ -128,6 +128,18 @@ def build_daily_embed(stats: dict, report_date: date) -> discord.Embed:
         inline=True,
     )
 
+    leaderboard: list[tuple[str, int]] = stats.get("leaderboard", [])
+    if leaderboard:
+        lines = [
+            f"`{i}.` **{name}** — {fmt_number(count)} msgs"
+            for i, (name, count) in enumerate(leaderboard[:10], start=1)
+        ]
+        embed.add_field(
+            name="🏆 Top Contributors",
+            value="\n".join(lines),
+            inline=False,
+        )
+
     embed.set_footer(text="Analytics Bot V1.1 • Daily Report")
     embed.timestamp = discord.utils.utcnow()
     return embed
@@ -140,7 +152,8 @@ def build_weekly_embed(stats: dict, start: date, end: date) -> discord.Embed:
     Full embed for a scheduled weekly report.
 
     Args:
-        stats: Dict from ``AnalyticsService.summary()`` for the 7-day window.
+        stats: Dict from ``AnalyticsService.summary()`` for the 7-day window
+               (may include ``leaderboard`` and ``prev_messages``).
         start: First day of the reporting period.
         end:   Last day of the reporting period.
     """
@@ -185,6 +198,18 @@ def build_weekly_embed(stats: dict, start: date, end: date) -> discord.Embed:
         value=fmt_member_delta(joined, left),
         inline=True,
     )
+
+    leaderboard: list[tuple[str, int]] = stats.get("leaderboard", [])
+    if leaderboard:
+        lines = [
+            f"`{i}.` **{name}** — {fmt_number(count)} msgs"
+            for i, (name, count) in enumerate(leaderboard[:10], start=1)
+        ]
+        embed.add_field(
+            name="🏆 Weekly Top Contributors",
+            value="\n".join(lines),
+            inline=False,
+        )
 
     embed.set_footer(text="Analytics Bot V1.1 • Weekly Report")
     embed.timestamp = discord.utils.utcnow()
