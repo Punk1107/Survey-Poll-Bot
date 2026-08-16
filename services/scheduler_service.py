@@ -99,34 +99,46 @@ class SchedulerService:
     async def _process_guild(self, settings) -> None:  # type: ignore[no-untyped-def]
         """Check and optionally deliver daily and/or weekly reports for one guild."""
         now = datetime.now(ZoneInfo(settings.timezone))
-        current_time_str = now.strftime("%H:%M")
 
-        # If we have reached today's report time, the report covers yesterday.
-        # If we haven't reached it yet, the report should cover the day before yesterday.
-        # This prevents skipping a day entirely if the bot restarts across midnight.
-        if current_time_str >= settings.report_time:
-            period_end = (now - timedelta(days=1)).date()
-        else:
-            period_end = (now - timedelta(days=2)).date()
+        # Only act when the current HH:MM exactly matches the configured report time.
+        # This prevents duplicate sends across the many loop ticks within the same hour.
+        if now.strftime("%H:%M") != settings.report_time:
+            return
+
+        # The report covers the completed day *before* the fire time (i.e. yesterday).
+        period_end = (now - timedelta(days=1)).date()
 
         guild_id = int(settings.guild_id)
         channel_id = int(settings.stats_channel_id)
 
-        # 1. Process Daily Report if enabled
+        # 1. Daily report — fires every day if enabled
         if settings.daily_enabled:
-            if not await self._report_repo.already_delivered(guild_id, "daily", period_end):
+            already = await self._report_repo.already_delivered(guild_id, "daily", period_end)
+            if not already:
+                # Mark delivered *before* sending to guard against races / retries.
+                await self._report_repo.mark_delivered(guild_id, "daily", period_end)
                 success = await self._report_service.deliver(
                     guild_id, channel_id, "daily", period_end
                 )
-                if success:
-                    await self._report_repo.mark_delivered(guild_id, "daily", period_end)
+                if not success:
+                    log.warning(
+                        "Daily report delivery failed for guild=%s period_end=%s",
+                        guild_id,
+                        period_end,
+                    )
 
-        # 2. Process Weekly Report if enabled and today is Monday (weekday == 0)
+        # 2. Weekly report — fires only on Monday (weekday == 0) if enabled
         if settings.weekly_enabled and now.weekday() == 0:
-            if not await self._report_repo.already_delivered(guild_id, "weekly", period_end):
+            already = await self._report_repo.already_delivered(guild_id, "weekly", period_end)
+            if not already:
+                await self._report_repo.mark_delivered(guild_id, "weekly", period_end)
                 success = await self._report_service.deliver(
                     guild_id, channel_id, "weekly", period_end
                 )
-                if success:
-                    await self._report_repo.mark_delivered(guild_id, "weekly", period_end)
+                if not success:
+                    log.warning(
+                        "Weekly report delivery failed for guild=%s period_end=%s",
+                        guild_id,
+                        period_end,
+                    )
 

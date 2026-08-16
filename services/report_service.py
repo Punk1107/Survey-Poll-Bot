@@ -90,6 +90,8 @@ class ReportService:
         days = 7 if report_type == "weekly" else 1
         start = period_end - timedelta(days=days - 1)
         stats = await self._analytics.summary(guild_id, start, period_end)
+        leaderboard = await self._analytics.leaderboard(guild_id, start, period_end)
+        stats["leaderboard"] = leaderboard
 
         if report_type == "weekly":
             prev_start = start - timedelta(days=7)

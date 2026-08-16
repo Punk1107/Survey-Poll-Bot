@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import date
 
 from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.connection import get_session
 from models import AnalyticsChannel, DailyChannelStat
