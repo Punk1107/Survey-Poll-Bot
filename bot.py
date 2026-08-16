@@ -3,6 +3,7 @@ Survey Poll Bot — bot.py
 Comprehensive Discord slash-command bot for creating, managing, and answering surveys.
 """
 
+import asyncio
 import logging
 import os
 import sys
@@ -118,7 +119,7 @@ async def on_ready():
             log.info("✅ Guild sync complete: %d guild(s) synced in analytics database.", synced_count)
             log.info("📊 Analytics ready.")
 
-        bot.loop.create_task(sync_guilds())
+        asyncio.create_task(sync_guilds())
 
         await bot.tree.sync()
         _synced = True
@@ -178,17 +179,17 @@ class SurveyTransformer(app_commands.Transformer):
     async def autocomplete(self, interaction: discord.Interaction, current: str):
         try:
             async with get_session() as session:
-                # Optimize: only select id and title, limit results
-                # ilike with index-friendly patterns if possible
+                # Select only id and title — avoids loading columns that may not
+                # exist in older DB schemas (e.g. description, max_responses).
                 result = await session.execute(
                     select(Survey.id, Survey.title)
-                    .filter(Survey.title.ilike(f"%{current}%"))
+                    .where(Survey.title.ilike(f"%{current}%"))
                     .order_by(Survey.created_at.desc())
                     .limit(25)
                 )
                 surveys = result.all()
             return [
-                app_commands.Choice(name=f"{s.id} │ {s.title[:80]}", value=str(s.id))
+                app_commands.Choice(name=f"{s[0]} │ {s[1][:80]}", value=str(s[0]))
                 for s in surveys
             ]
         except Exception as exc:
@@ -384,9 +385,19 @@ async def add_choice(
 
         # Verify ownership via the parent survey
         s = await session.get(Survey, question.survey_id)
-        if s and s.creator_id != str(interaction.user.id):
+        if not s:
+            await interaction.response.send_message(
+                "❌ The survey this question belongs to no longer exists.", ephemeral=True
+            )
+            return
+        if s.creator_id != str(interaction.user.id):
             await interaction.response.send_message(
                 "🚫 Only the survey creator can add choices.", ephemeral=True
+            )
+            return
+        if s.is_closed:
+            await interaction.response.send_message(
+                "❌ Cannot modify a closed survey.", ephemeral=True
             )
             return
 

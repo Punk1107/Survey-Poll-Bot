@@ -100,7 +100,14 @@ class ActivityService:
         # 2. Determine local day and hour
         tz = await self._timezone_for_guild(guild_id)
 
-        local = (occurred_at or datetime.now(tz)).astimezone(tz)
+        if occurred_at is None:
+            local = datetime.now(tz)
+        elif occurred_at.tzinfo is None:
+            # Treat naive datetimes as UTC to avoid silent wrong-date bugs
+            from datetime import timezone as _tz
+            local = occurred_at.replace(tzinfo=_tz.utc).astimezone(tz)
+        else:
+            local = occurred_at.astimezone(tz)
         day, hour = local.date(), local.hour
 
         # 3. Record in all stat tables

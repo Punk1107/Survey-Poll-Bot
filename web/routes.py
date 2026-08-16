@@ -270,7 +270,7 @@ def make_routes(bot: "discord.Client") -> web.RouteTableDef:
     @routes.get("/api/guild/{guild_id}/stats")
     async def api_guild_stats(request: web.Request) -> web.Response:
         """Guild stats API."""
-        guild_id = _parse_int(request.match_info["guild_id"], "guild_id", minimum=1, maximum=10**30)
+        guild_id = _parse_int(request.match_info["guild_id"], "guild_id", minimum=1, maximum=2**63 - 1)
         start, end, days = _parse_period(request)
         summary = await analytics.summary(guild_id, start, end)
         limit = _parse_int(request.rel_url.query.get("limit", "10"), "limit", minimum=1, maximum=50)
@@ -290,7 +290,7 @@ def make_routes(bot: "discord.Client") -> web.RouteTableDef:
     @routes.get("/api/guild/{guild_id}/weekly")
     async def api_guild_weekly(request: web.Request) -> web.Response:
         """Guild weekly report API."""
-        guild_id = _parse_int(request.match_info["guild_id"], "guild_id", minimum=1, maximum=10**30)
+        guild_id = _parse_int(request.match_info["guild_id"], "guild_id", minimum=1, maximum=2**63 - 1)
         start, end, days = _parse_period(request, default_days=7, max_days=31)
         summary = await analytics.summary(guild_id, start, end)
         return _json(
@@ -304,8 +304,8 @@ def make_routes(bot: "discord.Client") -> web.RouteTableDef:
     @routes.get("/api/user/{guild_id}/{user_id}")
     async def api_user_stats(request: web.Request) -> web.Response:
         """User stats API."""
-        guild_id = _parse_int(request.match_info["guild_id"], "guild_id", minimum=1, maximum=10**30)
-        user_id = _parse_int(request.match_info["user_id"], "user_id", minimum=1, maximum=10**30)
+        guild_id = _parse_int(request.match_info["guild_id"], "guild_id", minimum=1, maximum=2**63 - 1)
+        user_id = _parse_int(request.match_info["user_id"], "user_id", minimum=1, maximum=2**63 - 1)
         start, end, days = _parse_period(request)
         summary = await analytics.summary(guild_id, start, end, user_id=user_id)
         return _json(

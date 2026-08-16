@@ -47,13 +47,28 @@ def register_config_commands(
         interaction: discord.Interaction,
         channel: discord.TextChannel,
     ) -> None:
-        await analytics.update_settings(
-            interaction.guild_id, stats_channel_id=str(channel.id)
-        )
-        await interaction.response.send_message(
-            f"✅ Analytics reports will be sent to {channel.mention}.",
-            ephemeral=True,
-        )
+        # Save the channel and ensure both reports are enabled.
+        # If the admin is explicitly configuring a channel, they clearly want reports.
+        # They can still turn individual types off with /config daily off / /config weekly off.
+        current = await analytics.get_settings(interaction.guild_id)
+        updates: dict = {"stats_channel_id": str(channel.id)}
+        newly_enabled: list[str] = []
+        if not current.daily_enabled:
+            updates["daily_enabled"] = True
+            newly_enabled.append("daily")
+        if not current.weekly_enabled:
+            updates["weekly_enabled"] = True
+            newly_enabled.append("weekly")
+
+        await analytics.update_settings(interaction.guild_id, **updates)
+
+        msg = f"✅ Analytics reports will be sent to {channel.mention}.\n"
+        msg += f"⏰ Scheduled at **{current.report_time}** ({current.timezone})"
+        if newly_enabled:
+            msg += f"\n📬 **{' and '.join(r.capitalize() for r in newly_enabled)} reports** have been automatically enabled."
+        msg += "\nUse `/config daily off` or `/config weekly off` to disable specific report types."
+
+        await interaction.response.send_message(msg, ephemeral=True)
 
     # ── /config daily ─────────────────────────────────────────────────────────
 

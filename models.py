@@ -105,8 +105,8 @@ class GuildSettings(Base):
 
     guild_id = Column(String, ForeignKey("analytics_guilds.guild_id", ondelete="CASCADE"), primary_key=True)
     stats_channel_id = Column(String, nullable=True)
-    daily_enabled = Column(Boolean, default=False, nullable=False)
-    weekly_enabled = Column(Boolean, default=False, nullable=False)
+    daily_enabled = Column(Boolean, default=True, server_default="1", nullable=False)
+    weekly_enabled = Column(Boolean, default=True, server_default="1", nullable=False)
     report_time = Column(String(5), default="09:00", nullable=False)
     timezone = Column(String(64), default="Asia/Bangkok", nullable=False)
 
@@ -148,7 +148,7 @@ class DailyUserStat(Base):
     user_id = Column(String, primary_key=True)
     date = Column(Date, primary_key=True)
     messages = Column(Integer, default=0, server_default="0", nullable=False)
-    __table_args__ = (Index("ix_daily_user_stats_lookup", "guild_id", "date", "messages"),)
+    __table_args__ = (Index("ix_daily_user_stats_lookup", "guild_id", "date", "user_id"),)
 
 
 class DailyChannelStat(Base):
@@ -158,7 +158,7 @@ class DailyChannelStat(Base):
     channel_id = Column(String, primary_key=True)
     date = Column(Date, primary_key=True)
     messages = Column(Integer, default=0, server_default="0", nullable=False)
-    __table_args__ = (Index("ix_daily_channel_stats_lookup", "guild_id", "date", "messages"),)
+    __table_args__ = (Index("ix_daily_channel_stats_lookup", "guild_id", "date", "channel_id"),)
 
 
 class HourlyGuildStat(Base):

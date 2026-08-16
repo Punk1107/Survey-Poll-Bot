@@ -107,15 +107,20 @@ class GuildRepository:
 
     async def all_with_channel(self) -> list[GuildSettings]:
         """
-        Return all ``GuildSettings`` rows that have a ``stats_channel_id`` set.
+        Return all ``GuildSettings`` rows that have a ``stats_channel_id`` set
+        AND at least one report type enabled.
 
         Used by the scheduler to find guilds that should receive reports.
+        Guilds with no channel or all reports disabled are excluded so the
+        scheduler loop does not waste time loading rows it will immediately skip.
         """
         async with get_session() as session:
             rows = (
                 await session.execute(
                     select(GuildSettings).where(
-                        GuildSettings.stats_channel_id.is_not(None)
+                        GuildSettings.stats_channel_id.is_not(None),
+                        (GuildSettings.daily_enabled == True)  # noqa: E712
+                        | (GuildSettings.weekly_enabled == True),  # noqa: E712
                     )
                 )
             ).scalars().all()
