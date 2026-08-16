@@ -67,6 +67,15 @@ class AnalyticsService:
         gid = str(guild_id)
 
         async with get_session() as session:
+            if user_id is not None:
+                # Per-user view: only fetch that user's message count.
+                # Guild-level aggregates (active_users, new_members, etc.) are
+                # not meaningful here and are skipped to avoid wasted queries.
+                user_msgs = await self._users.total_messages(
+                    guild_id, user_id, start, end, session=session
+                )
+                return {"messages": int(user_msgs or 0)}
+
             # Guild-level totals
             guild_stmt = select(
                 func.coalesce(func.sum(DailyGuildStat.messages), 0),
@@ -97,23 +106,14 @@ class AnalyticsService:
             active_users = await self._users.active_count(guild_id, start, end, session=session)
             top_channel = await self._channels.top_channel(guild_id, start, end, session=session)
 
-            if user_id is not None:
-                user_msgs = await self._users.total_messages(
-                    guild_id, user_id, start, end, session=session
-                )
-            else:
-                user_msgs = None
-
-        result: dict = {
-            "messages": int(messages) if user_id is None else int(user_msgs or 0),
+        return {
+            "messages": int(messages),
             "active_users": int(active_users),
             "new_members": int(joined),
             "left_members": int(left),
             "top_channel": top_channel,
             "peak_hour": peak[0] if peak else None,
         }
-
-        return result
 
     async def leaderboard(
         self, guild_id: int, start: date, end: date, limit: int = 10

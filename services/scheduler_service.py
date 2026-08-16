@@ -51,6 +51,16 @@ class SchedulerService:
         self._report_service = ReportService(bot, analytics)
         self._report_repo = ReportRepository()
 
+        # IMPORTANT: @tasks.loop creates a *class-level* Loop object, not an
+        # instance-level one.  If two SchedulerService instances were ever created
+        # (e.g. during testing or a misconfigured hot-reload), they would share
+        # the same Loop, causing stale-self bugs.
+        #
+        # We work around this by constructing a fresh per-instance Loop in
+        # __init__ and wiring the before_loop hook explicitly.
+        self._loop: tasks.Loop = tasks.loop(minutes=1)(self._tick)  # type: ignore[assignment]
+        self._loop.before_loop(self._before_loop)
+
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
     def start(self) -> None:
@@ -67,8 +77,7 @@ class SchedulerService:
 
     # ── Loop ───────────────────────────────────────────────────────────────────
 
-    @tasks.loop(minutes=1)
-    async def _loop(self) -> None:
+    async def _tick(self) -> None:
         """
         Called every minute.
 
@@ -89,20 +98,56 @@ class SchedulerService:
                     exc,
                 )
 
-    @_loop.before_loop
     async def _before_loop(self) -> None:
         """Wait until the Discord bot is fully ready before the loop starts."""
         await self._bot.wait_until_ready()
 
     # ── Per-guild logic ────────────────────────────────────────────────────────
 
+    # How many minutes past the configured time we'll still attempt delivery.
+    # This creates a catch-up window so the report fires even if the bot was
+    # briefly down at the exact scheduled time.
+    _CATCHUP_WINDOW_MINUTES: int = 5
+
     async def _process_guild(self, settings) -> None:  # type: ignore[no-untyped-def]
         """Check and optionally deliver daily and/or weekly reports for one guild."""
-        now = datetime.now(ZoneInfo(settings.timezone))
 
-        # Only act when the current HH:MM exactly matches the configured report time.
-        # This prevents duplicate sends across the many loop ticks within the same hour.
-        if now.strftime("%H:%M") != settings.report_time:
+        # Guard: channel must be set before we do anything
+        if not settings.stats_channel_id:
+            return
+
+        try:
+            tz = ZoneInfo(settings.timezone)
+        except Exception:
+            log.warning(
+                "Guild %s has invalid timezone %r — skipping scheduler",
+                settings.guild_id,
+                settings.timezone,
+            )
+            return
+
+        now = datetime.now(tz)
+
+        # Check if we're within the catch-up window of the configured report time.
+        # This handles the common case where the bot was briefly down at the exact
+        # scheduled minute — we'll still fire within the next N minutes.
+        try:
+            report_h, report_m = map(int, settings.report_time.split(":"))
+        except (ValueError, AttributeError):
+            log.warning(
+                "Guild %s has invalid report_time %r — skipping scheduler",
+                settings.guild_id,
+                settings.report_time,
+            )
+            return
+
+        now_total_minutes = now.hour * 60 + now.minute
+        report_total_minutes = report_h * 60 + report_m
+        minutes_past = now_total_minutes - report_total_minutes
+
+        # Only fire within [0, CATCHUP_WINDOW_MINUTES) minutes after the configured time.
+        # Negative means we haven't reached the time yet; too large means we already passed.
+        if not (0 <= minutes_past < self._CATCHUP_WINDOW_MINUTES):
             return
 
         # The report covers the completed day *before* the fire time (i.e. yesterday).
@@ -110,6 +155,16 @@ class SchedulerService:
 
         guild_id = int(settings.guild_id)
         channel_id = int(settings.stats_channel_id)
+
+        log.debug(
+            "Scheduler fire: guild=%s report_time=%s now=%s period_end=%s daily=%s weekly=%s",
+            guild_id,
+            settings.report_time,
+            now.strftime("%H:%M"),
+            period_end,
+            settings.daily_enabled,
+            settings.weekly_enabled,
+        )
 
         # 1. Daily report — fires every day if enabled
         if settings.daily_enabled:
@@ -126,6 +181,8 @@ class SchedulerService:
                         guild_id,
                         period_end,
                     )
+            else:
+                log.debug("Daily report already delivered: guild=%s period_end=%s", guild_id, period_end)
 
         # 2. Weekly report — fires only on Monday (weekday == 0) if enabled
         if settings.weekly_enabled and now.weekday() == 0:
@@ -141,4 +198,6 @@ class SchedulerService:
                         guild_id,
                         period_end,
                     )
+            else:
+                log.debug("Weekly report already delivered: guild=%s period_end=%s", guild_id, period_end)
 

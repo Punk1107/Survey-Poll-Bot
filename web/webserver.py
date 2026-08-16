@@ -44,15 +44,21 @@ log = logging.getLogger(__name__)
 @web.middleware
 async def _api_headers_middleware(request: web.Request, handler):  # type: ignore[no-untyped-def]
     if request.method == "OPTIONS":
+        # Handle CORS preflight directly — browsers send OPTIONS before any
+        # cross-origin request, not just /api/ routes.
         response = web.Response(status=204)
-    else:
-        response = await handler(request)
+        response.headers["Access-Control-Allow-Origin"] = os.getenv("API_CORS_ORIGIN", "*")
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        response.headers["Access-Control-Max-Age"] = "86400"
+        return response
+
+    response = await handler(request)
 
     if request.path.startswith("/api/"):
         response.headers["Access-Control-Allow-Origin"] = os.getenv("API_CORS_ORIGIN", "*")
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
         response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-        response.headers["Access-Control-Max-Age"] = "86400"
         response.headers["Cache-Control"] = "public, max-age=15"
 
     return response

@@ -64,7 +64,7 @@ class ActivityRepository:
             # Upsert user and channel metadata
             await session.execute(text("""
                 INSERT INTO analytics_users (guild_id, user_id, display_name, is_bot)
-                VALUES (:g, :u, :name, 0)
+                VALUES (:g, :u, :name, FALSE)
                 ON CONFLICT(guild_id, user_id)
                 DO UPDATE SET display_name = excluded.display_name
             """), params)
@@ -116,6 +116,9 @@ class ActivityRepository:
     async def _bump_member_field(
         self, guild_id: int, day: date, field: str
     ) -> None:
+        _ALLOWED_FIELDS = {"new_members", "left_members"}
+        if field not in _ALLOWED_FIELDS:
+            raise ValueError(f"Invalid field name for member bump: {field!r}")
         async with get_session() as session:
             await session.execute(
                 text(

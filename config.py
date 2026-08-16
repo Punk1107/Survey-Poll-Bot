@@ -6,7 +6,7 @@ load_dotenv()
 
 DISCORD_TOKEN: str = os.getenv("DISCORD_TOKEN", "")
 DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///surveys.db")
-DB_PATH: str = os.getenv("DB_PATH", "data/analytics.db")
+DB_PATH: str = os.getenv("DB_PATH", "data/analytics.db")  # NOTE: currently unused — analytics tables live in DATABASE_URL (surveys.db)
 DEFAULT_TIMEZONE: str = os.getenv("DEFAULT_TIMEZONE", "Asia/Bangkok")
 WEB_PORT: int = int(os.getenv("PORT", "8080"))
 API_MAX_BODY_MB: int = int(os.getenv("API_MAX_BODY_MB", "10"))

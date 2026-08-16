@@ -121,12 +121,120 @@ async def migration_v3(conn: AsyncConnection) -> None:
         await conn.execute(text(statement))
 
 
+async def migration_v4(conn: AsyncConnection) -> None:
+    """
+    V4 — fix incorrect index columns on ``daily_user_stats`` and ``daily_channel_stats``.
+
+    The original indexes (``ix_daily_user_stats_lookup`` and
+    ``ix_daily_channel_stats_lookup``) mistakenly included the ``messages`` column
+    as the third key.  ``messages`` is a value column — it is never used in WHERE
+    predicates — so the index was providing no benefit on queries while adding
+    write overhead on every message event.
+
+    This migration drops the old indexes and recreates them with the correct
+    columns (``user_id`` and ``channel_id``) that are actually referenced in
+    JOIN and WHERE clauses.
+    """
+    # Drop old (incorrect) indexes — IF EXISTS makes this idempotent.
+    await conn.execute(text("DROP INDEX IF EXISTS ix_daily_user_stats_lookup"))
+    await conn.execute(text("DROP INDEX IF EXISTS ix_daily_channel_stats_lookup"))
+
+    # Recreate with correct columns.
+    await conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_daily_user_stats_lookup "
+        "ON daily_user_stats (guild_id, date, user_id)"
+    ))
+    await conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_daily_channel_stats_lookup "
+        "ON daily_channel_stats (guild_id, date, channel_id)"
+    ))
+    log.info("Migration v4: rebuilt daily_user_stats and daily_channel_stats indexes")
+
+
+async def migration_v5(conn: AsyncConnection) -> None:
+    """
+    V5 — add missing columns to the ``surveys`` and ``questions`` tables.
+
+    These columns were added to the ORM model after the initial release.
+    ``Base.metadata.create_all`` never adds columns to *existing* tables, so
+    databases created before these columns were introduced will be missing them.
+
+    This migration is idempotent: it checks the existing column list via
+    ``PRAGMA table_info`` before issuing any ``ALTER TABLE`` statement.
+
+    Columns added to ``surveys``:
+      - ``description``    TEXT (nullable)
+      - ``max_responses``  INTEGER (nullable)
+      - ``is_active``      BOOLEAN NOT NULL DEFAULT 1
+
+    Columns added to ``questions``:
+      - ``order``          INTEGER NOT NULL DEFAULT 0
+    """
+    async def _existing_columns(table: str) -> set[str]:
+        """Return the set of column names for *table* (works on SQLite & PostgreSQL)."""
+        def _get_cols(sync_conn):
+            insp = inspect(sync_conn)
+            if not insp.has_table(table):
+                return set()
+            return {c["name"] for c in insp.get_columns(table)}
+        return await conn.run_sync(_get_cols)
+
+    surveys_cols = await _existing_columns("surveys")
+    if "description" not in surveys_cols:
+        await conn.execute(text("ALTER TABLE surveys ADD COLUMN description TEXT"))
+        log.info("Migration v5: added column surveys.description")
+    if "max_responses" not in surveys_cols:
+        await conn.execute(text("ALTER TABLE surveys ADD COLUMN max_responses INTEGER"))
+        log.info("Migration v5: added column surveys.max_responses")
+    if "is_active" not in surveys_cols:
+        bool_col_type = "BOOLEAN DEFAULT TRUE" if conn.dialect.name != "sqlite" else "BOOLEAN NOT NULL DEFAULT 1"
+        await conn.execute(text(f"ALTER TABLE surveys ADD COLUMN is_active {bool_col_type}"))
+        log.info("Migration v5: added column surveys.is_active")
+
+    questions_cols = await _existing_columns("questions")
+    if "order" not in questions_cols:
+        await conn.execute(text('ALTER TABLE questions ADD COLUMN "order" INTEGER NOT NULL DEFAULT 0'))
+        log.info("Migration v5: added column questions.order")
+
+
+async def migration_v6(conn: AsyncConnection) -> None:
+    """
+    V6 — enable reports for guilds that already have a channel configured.
+
+    The original schema defaulted ``daily_enabled`` and ``weekly_enabled`` to
+    ``False``.  This meant that admins who ran ``/config stats-channel`` but
+    never explicitly ran ``/config daily on`` and ``/config weekly on`` received
+    no reports at all — silently.
+
+    This migration flips both flags to ``True`` for every ``guild_settings`` row
+    that already has a ``stats_channel_id`` set, matching the admin's clear intent
+    when they configured a channel.  Guilds with no channel configured are left
+    untouched (no point enabling reports with nowhere to send them).
+    """
+    result = await conn.execute(text("""
+        UPDATE guild_settings
+        SET daily_enabled = TRUE, weekly_enabled = TRUE
+        WHERE stats_channel_id IS NOT NULL
+          AND (daily_enabled = FALSE OR daily_enabled IS NULL)
+          AND (weekly_enabled = FALSE OR weekly_enabled IS NULL)
+    """))
+    rows_updated = result.rowcount
+    if rows_updated:
+        log.info(
+            "Migration v6: enabled reports for %d guild(s) that already had a stats channel configured",
+            rows_updated,
+        )
+
+
 # ── Migration registry ─────────────────────────────────────────────────────────
 # Order matters — migrations run in list order, one per version increment.
 MIGRATIONS: list[MigrationFn] = [
     migration_v1,   # version 1
     migration_v2,   # version 2
     migration_v3,   # version 3
+    migration_v4,   # version 4
+    migration_v5,   # version 5
+    migration_v6,   # version 6
 ]
 
 

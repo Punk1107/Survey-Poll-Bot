@@ -44,7 +44,7 @@ class UserRepository:
                     "g": str(guild_id),
                     "u": str(user_id),
                     "name": display_name,
-                    "bot": int(is_bot),
+                    "bot": bool(is_bot),
                 },
             )
 
