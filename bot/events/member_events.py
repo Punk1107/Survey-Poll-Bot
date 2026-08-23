@@ -23,12 +23,15 @@ def register_member_events(bot: commands.Bot, activity: ActivityService) -> None
     """
     Attach member join/remove event handlers to *bot*.
 
+    Uses ``bot.add_listener()`` instead of ``@bot.event`` so that these
+    listeners are *added* alongside any existing handlers rather than
+    *replacing* them — which is critical when called from inside setup_hook.
+
     Args:
         bot:      The Discord bot instance.
         activity: The ActivityService that will record the events.
     """
 
-    @bot.event
     async def on_member_join(member: discord.Member) -> None:
         """Record that a member joined the guild."""
         guild = member.guild
@@ -42,7 +45,6 @@ def register_member_events(bot: commands.Bot, activity: ActivityService) -> None
         except Exception as exc:  # noqa: BLE001
             log.exception("Failed to record member join: %s", exc)
 
-    @bot.event
     async def on_member_remove(member: discord.Member) -> None:
         """Record that a member left the guild."""
         guild = member.guild
@@ -55,3 +57,7 @@ def register_member_events(bot: commands.Bot, activity: ActivityService) -> None
             log.debug("Member remove recorded: guild=%s user=%s", guild.id, member.id)
         except Exception as exc:  # noqa: BLE001
             log.exception("Failed to record member remove: %s", exc)
+
+    bot.add_listener(on_member_join, "on_member_join")
+    bot.add_listener(on_member_remove, "on_member_remove")
+    log.info("✅ on_member_join / on_member_remove listeners registered via add_listener")

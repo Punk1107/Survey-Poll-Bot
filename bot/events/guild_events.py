@@ -24,12 +24,15 @@ def register_guild_events(bot: commands.Bot, analytics: AnalyticsService) -> Non
     """
     Attach guild join/remove event handlers to *bot*.
 
+    Uses ``bot.add_listener()`` instead of ``@bot.event`` so that these
+    listeners are *added* alongside any existing handlers rather than
+    *replacing* them — which is critical when called from inside setup_hook.
+
     Args:
         bot:      The Discord bot instance.
         analytics: AnalyticsService used to register / de-register guilds.
     """
 
-    @bot.event
     async def on_guild_join(guild: discord.Guild) -> None:
         """
         Called when the bot is added to a new guild.
@@ -51,9 +54,12 @@ def register_guild_events(bot: commands.Bot, analytics: AnalyticsService) -> Non
         except discord.HTTPException as exc:
             log.warning("Failed to sync commands to guild %s: %s", guild.id, exc)
 
-    @bot.event
     async def on_guild_remove(guild: discord.Guild) -> None:
         """Called when the bot is removed from a guild."""
         log.info("Bot removed from guild: %s (%s)", guild.name, guild.id)
         # Note: analytics data is retained (CASCADE delete NOT triggered here).
         # If you want to purge data on bot removal, call GuildRepository.remove().
+
+    bot.add_listener(on_guild_join, "on_guild_join")
+    bot.add_listener(on_guild_remove, "on_guild_remove")
+    log.info("✅ on_guild_join / on_guild_remove listeners registered via add_listener")
