@@ -95,7 +95,11 @@ class ActivityService:
         3. UPSERT all stat counters via ActivityRepository.
         """
         # 1. Ensure guild exists
-        await self._ensure_guild_cached(guild_id, guild_name, member_count)
+        try:
+            await self._ensure_guild_cached(guild_id, guild_name, member_count)
+        except Exception as exc:
+            log.exception("❌ GUILD UPSERT FAILED | guild=%s | error=%s", guild_id, exc)
+            raise
 
         # 2. Determine local day and hour
         tz = await self._timezone_for_guild(guild_id)
@@ -109,6 +113,11 @@ class ActivityService:
         else:
             local = occurred_at.astimezone(tz)
         day, hour = local.date(), local.hour
+
+        log.debug(
+            "🗓️  Recording | guild=%s | day=%s | hour=%s | tz=%s",
+            guild_id, day, hour, tz.key,
+        )
 
         # 3. Record in all stat tables
         await self._activity.record_message(

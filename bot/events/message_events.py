@@ -59,6 +59,17 @@ def register_message_events(bot: commands.Bot, activity: ActivityService) -> Non
         # Channel must be a text channel to have a meaningful name
         channel_name = getattr(channel, "name", str(channel.id))
 
+        # ── Diagnostic log (remove after confirming stats work correctly) ──
+        log.info(
+            "📨 MESSAGE | guild=%s (%s) | channel=%s (#%s) | user=%s (%s)",
+            guild.id,
+            guild.name,
+            channel.id,
+            channel_name,
+            message.author.id,
+            message.author.display_name,
+        )
+
         try:
             await activity.record_message(
                 guild_id=guild.id,
@@ -69,5 +80,17 @@ def register_message_events(bot: commands.Bot, activity: ActivityService) -> Non
                 user_id=message.author.id,
                 display_name=message.author.display_name,
             )
+            log.info(
+                "✅ RECORDED | guild=%s | channel=%s | user=%s",
+                guild.id,
+                channel.id,
+                message.author.id,
+            )
         except Exception as exc:  # noqa: BLE001
-            log.exception("Failed to record message event: %s", exc)
+            log.exception(
+                "❌ FAILED to record message | guild=%s | channel=%s | user=%s | error=%s",
+                guild.id,
+                channel.id,
+                message.author.id,
+                exc,
+            )
