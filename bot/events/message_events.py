@@ -28,12 +28,15 @@ def register_message_events(bot: commands.Bot, activity: ActivityService) -> Non
     """
     Attach the ``on_message`` event handler to *bot*.
 
+    Uses ``bot.add_listener()`` instead of ``@bot.event`` so that this
+    listener is *added* alongside any existing handlers rather than
+    *replacing* them — which is critical when called from inside setup_hook.
+
     Args:
         bot:      The Discord bot instance.
         activity: The ActivityService that will record the event.
     """
 
-    @bot.event
     async def on_message(message: discord.Message) -> None:
         """
         Record aggregate message activity.
@@ -59,7 +62,6 @@ def register_message_events(bot: commands.Bot, activity: ActivityService) -> Non
         # Channel must be a text channel to have a meaningful name
         channel_name = getattr(channel, "name", str(channel.id))
 
-        # ── Diagnostic log (remove after confirming stats work correctly) ──
         log.info(
             "📨 MESSAGE | guild=%s (%s) | channel=%s (#%s) | user=%s (%s)",
             guild.id,
@@ -94,3 +96,6 @@ def register_message_events(bot: commands.Bot, activity: ActivityService) -> Non
                 message.author.id,
                 exc,
             )
+
+    bot.add_listener(on_message, "on_message")
+    log.info("✅ on_message listener registered via add_listener")
